@@ -144,30 +144,38 @@ type CteResolution =
 // missing level-D row, matching the loop's null. Every node the walk
 // touches is returned so the caller can detect any symlink and fall
 // back.
+//
+// The next segment's name is computed from the walk row itself
+// (json_extract at index w.level) rather than joined in from a
+// json_each table. That makes it a value of the outer row, so the
+// dirent lookup is always a seek on the full (parent_inode, name)
+// primary key. When the segments were a joined table, the planner put
+// the virtual table last and read every child of each directory on the
+// path before matching the name: O(siblings) per level, which made
+// sync pulls into a wide directory quadratic. The depth guard ends the
+// walk at the target instead of probing past it. Exported for the
+// query-plan regression test.
+export const RESOLVE_WALK_SQL = `WITH RECURSIVE
+  walk(level, inode, type, mode, mtime, size, link_target) AS (
+    SELECT 0, n.inode, n.type, n.mode, n.mtime, n.size, n.link_target
+      FROM vfs_nodes n
+     WHERE n.inode = ?2
+    UNION ALL
+    SELECT w.level + 1, n.inode, n.type, n.mode, n.mtime, n.size, n.link_target
+      FROM walk w
+      JOIN vfs_dirents d
+        ON d.parent_inode = w.inode
+       AND d.name = json_extract(?1, '$[' || w.level || ']')
+      JOIN vfs_nodes n ON n.inode = d.child_inode
+     WHERE w.type = 'dir'
+       AND w.level < json_array_length(?1)
+  )
+SELECT level, inode, type, mode, mtime, size, link_target
+  FROM walk
+ ORDER BY level`;
+
 function resolveViaCte(db: Database, parts: string[]): CteResolution {
-  const rows = db.all<CteRow>(
-    `WITH RECURSIVE
-       segs(level, name) AS (
-         SELECT key, value FROM json_each(?)
-       ),
-       walk(level, inode, type, mode, mtime, size, link_target) AS (
-         SELECT 0, n.inode, n.type, n.mode, n.mtime, n.size, n.link_target
-           FROM vfs_nodes n
-          WHERE n.inode = ?
-         UNION ALL
-         SELECT w.level + 1, n.inode, n.type, n.mode, n.mtime, n.size, n.link_target
-           FROM walk w
-           JOIN segs s ON s.level = w.level
-           JOIN vfs_dirents d ON d.parent_inode = w.inode AND d.name = s.name
-           JOIN vfs_nodes n ON n.inode = d.child_inode
-          WHERE w.type = 'dir'
-       )
-     SELECT level, inode, type, mode, mtime, size, link_target
-       FROM walk
-      ORDER BY level`,
-    JSON.stringify(parts),
-    ROOT_INODE,
-  );
+  const rows = db.all<CteRow>(RESOLVE_WALK_SQL, JSON.stringify(parts), ROOT_INODE);
 
   const depth = parts.length;
   let target: CteRow | undefined;
