@@ -24,7 +24,7 @@ export const INTROSPECTION_MODULE = "workspace-introspection.js";
 
 /** One line for the backend's description, beside the other modules. */
 export const COMPUTER_DESCRIPTION =
-  '- `cf:computer`: `docs(module)` returns a module\'s TypeScript declarations and examples, and `docs()` lists every module. Pass a namespace (`import * as git from "ws:git"`), a specifier string, or one export. `types(...)` returns the declarations alone. Printing a host export with `console.log` shows its declaration too.';
+  "- `cf:computer`: how to call every other module. Read a module's docs before you first call it. `docs(module)` returns a module's TypeScript declarations and examples, and `docs()` lists every module. Pass a namespace (`import * as git from \"ws:git\"`), a specifier string, or one export. `types(...)` returns the declarations alone. Printing a host export with `console.log` shows its declaration too.";
 
 /** What the isolate knows about every module it can import. */
 export interface ModuleCatalog {

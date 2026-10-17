@@ -1142,6 +1142,53 @@ describe("console output", () => {
     ]);
   });
 
+  it("runs a module with no exports as the body of the default export", async () => {
+    const result = await output(`
+      // A comment before the imports.
+      import { writeFile, readFile } from "node:fs/promises";
+      import {
+        status, // what changed
+      } from "ws:git";
+      await writeFile("/workspace/script.txt", "from a script");
+      const text = await readFile("/workspace/script.txt", "utf8");
+      if (typeof status !== "function") throw new Error("no status");
+      throw new Error("ran: " + text);
+    `);
+    expect(result).toMatchObject({ status: "failed" });
+    expect(result.stderr).toContain("ran: from a script");
+
+    const returned = await output(`
+      import { readFile } from "node:fs/promises";
+      return readFile("/workspace/script.txt", "utf8");
+    `);
+    expect(returned).toMatchObject({ status: "completed" });
+  });
+
+  it("runs a module with no exports as a script, for what it prints", async () => {
+    const result = await output(`
+      import * as git from "ws:git";
+      import { docs } from "cf:computer";
+      console.log(git);
+      console.log(docs().split("\\n")[0]);
+    `);
+    expect(result.status, result.stderr).toBe("completed");
+    expect(result.stdout).toContain('[Module: ws:git]\ndeclare module "ws:git" {');
+    expect(result.stdout).toContain("Modules code can import.");
+  });
+
+  it("points a call to an export a host module lacks at its docs", async () => {
+    const result = await output(`
+      import * as git from "ws:git";
+      export default () => git.init({ dir: "repo" });
+    `);
+    expect(result).toMatchObject({
+      status: "failed",
+      stderr: expect.stringContaining(
+        'is not a function. If that was a call into ws:git, docs("ws:git") from cf:computer lists what it exports.',
+      ),
+    });
+  });
+
   it("prints a host module's namespace and exports as their declarations", async () => {
     const result = await output(`
       import * as git from "ws:git";
@@ -1174,15 +1221,19 @@ describe("ws:git arguments", () => {
     ["cli({})", "argv must be an array of strings"],
     ['cli({ argv: ["git", "status"] })', 'argv leaves out "git": pass ["status"]'],
     ['status("/workspace")', "status takes one options object"],
+    [
+      'log({ cwd: "/workspace", maxCount: 3 })',
+      'has no option "cwd" or "maxCount". Its options are dir, ref, depth.',
+    ],
   ])("refuses %s with the call's shape", async (call, message) => {
     const result = await run(`
-      import { cli, status } from "ws:git";
+      import { cli, log, status } from "ws:git";
       export default async () => {
         try { await ${call}; } catch (error) { return error.message; }
         return "no error";
       };
     `);
     expect(result).toMatchObject({ status: "completed", value: expect.stringContaining(message) });
-    expect(result.value).toMatch(/Call it as|leaves out "git"/);
+    expect(result.value).toMatch(/Call it as|leaves out "git"|Its options are/);
   });
 });

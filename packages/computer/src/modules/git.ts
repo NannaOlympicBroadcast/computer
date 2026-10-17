@@ -211,15 +211,36 @@ function optionsObject(
   ) {
     const got = args.map((arg) => JSON.stringify(arg) ?? "undefined").join(", ");
     throw new TypeError(
-      `ws:git ${operation} takes one options object, but got (${got}). ${USAGE[operation]}`,
+      `ws:git ${operation} takes one options object, but got (${got}). ${USAGE[operation]}${SEE_DOCS}`,
+    );
+  }
+  // An option the export does not take would be ignored, and a guess
+  // such as log({ cwd }) would then run somewhere else. Name the ones
+  // it does take.
+  const allowed = OPTION_KEYS[operation];
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new TypeError(
+      `ws:git ${operation} has no option ${unknown.map((key) => JSON.stringify(key)).join(" or ")}. Its options are ${allowed.join(", ")}.${SEE_DOCS}`,
     );
   }
   return value;
 }
 
+const SEE_DOCS = ' docs("ws:git") from cf:computer shows every export\'s declaration.';
+
+// The options each export takes, as its declaration lists them.
+const OPTION_KEYS: Readonly<Record<keyof typeof USAGE, readonly string[]>> = {
+  clone: ["url", "dir", "ref", "depth", "singleBranch", "noTags", "paths", "headers"],
+  diff: ["dir", "ref", "to", "paths"],
+  status: ["dir"],
+  log: ["dir", "ref", "depth"],
+  cli: ["argv", "cwd", "env"],
+};
+
 function cliArguments(value: WorkspaceRuntimeValue | undefined): string[] {
   if (!Array.isArray(value) || !value.every(isString)) {
-    throw new TypeError(`ws:git cli argv must be an array of strings. ${USAGE.cli}`);
+    throw new TypeError(`ws:git cli argv must be an array of strings. ${USAGE.cli}${SEE_DOCS}`);
   }
   if (value[0] === "git") {
     throw new TypeError(

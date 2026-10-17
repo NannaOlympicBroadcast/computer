@@ -93,6 +93,10 @@ const EXPORT_NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 // `await import(...)`.
 const RESERVED_EXPORT_NAMES = new Set(["default", "then"]);
 
+// Code that reaches for a module it doesn't have, such as
+// node:child_process to run git, needs to learn what it has instead.
+const LIST_MODULES = `\`docs()\` from ${COMPUTER_MODULE} lists the modules code can import.`;
+
 /** The `modules` option, parsed once when the backend is constructed. */
 export interface ParsedModules {
   readonly source: Readonly<Record<string, string>>;
@@ -400,6 +404,7 @@ export async function buildModuleGraph(options: BuildModuleGraphOptions) {
     [CAPABILITIES_MODULE]: capabilitiesModule(options.maxCapabilityBytes),
   });
   const seen = new Set<string>();
+  const hostImports = new Set<string>();
   let totalBytes = new TextEncoder().encode(options.source).byteLength;
   const maxModules = options.maxModules ?? 128;
   const maxDepth = options.maxDepth ?? 32;
@@ -423,6 +428,7 @@ export async function buildModuleGraph(options: BuildModuleGraphOptions) {
         options.hostModules.has(specifier) ||
         Object.hasOwn(options.configuredModules, specifier)
       ) {
+        if (options.hostModules.has(specifier)) hostImports.add(specifier);
         edits.push({ ...site, specifier: relativeSpecifier(name, storedName(specifier)) });
         continue;
       }
@@ -448,7 +454,7 @@ export async function buildModuleGraph(options: BuildModuleGraphOptions) {
       }
       if (specifier.startsWith("ws:")) {
         throw new Error(
-          `Module ${JSON.stringify(specifier)} is not configured. Add it to the backend's modules option.`,
+          `Module ${JSON.stringify(specifier)} is not configured. Add it to the backend's modules option. ${LIST_MODULES}`,
         );
       }
       if (specifier.startsWith(".") || specifier.startsWith("/")) {
@@ -481,14 +487,14 @@ export async function buildModuleGraph(options: BuildModuleGraphOptions) {
         continue;
       }
       throw new Error(
-        `Module ${JSON.stringify(specifier)} is not configured for the worker-javascript backend.`,
+        `Module ${JSON.stringify(specifier)} is not configured for the worker-javascript backend. ${LIST_MODULES}`,
       );
     }
     modules[name] = rewriteImports(source, edits);
   }
 
-  assertDefaultExport(options.source);
-  await visit(entryPath, options.source, 0);
+  const entry = entrySource(options.source);
+  await visit(entryPath, entry, 0);
 
   // node:* specifiers are resolved by name in both registries, so they
   // keep their exact keys.
@@ -508,23 +514,85 @@ export async function buildModuleGraph(options: BuildModuleGraphOptions) {
     modules[storedName(specifier)] = { js: source };
   }
 
-  return { entryName, modules };
+  return { entryName, modules, hostImports: [...hostImports] };
 }
 
-// The run's result comes from the entry module's default export, so a
-// module without one would complete with nothing to show. Fail before
-// loading it, and name any other exports, since a model that writes
-// `export function main` meant one of them.
-function assertDefaultExport(source: string): void {
-  const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+// The run's result comes from the entry module's default export.
+//
+// A module with no exports at all is a script, and runs as the body of
+// the default export: its imports stay at the top, and everything else
+// moves into `export default async function () { ... }`. Top-level
+// `await` and `return` then work, and so does I/O, which the runtime
+// refuses while a module evaluates. The imports join the function's
+// opening on the first line, so a stack trace's line numbers match the
+// code as it was written.
+//
+// A module with named exports but no default would complete with
+// nothing to show, so it fails before loading, naming the exports,
+// since a model that writes `export function main` meant one of them.
+function entrySource(source: string): string {
+  const ast = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "module",
+    allowReturnOutsideFunction: true,
+  });
+  if (!ast.body.some((node) => node.type.startsWith("Export"))) return asScript(source, ast.body);
+  assertDefaultExport(ast.body);
+  return source;
+}
+
+type ProgramStatement = ReturnType<typeof parse>["body"][number];
+
+function asScript(source: string, body: readonly ProgramStatement[]): string {
+  const imports: string[] = [];
+  let rest = source;
+  for (const node of body) {
+    if (node.type !== "ImportDeclaration") continue;
+    imports.push(importStatement(node));
+    const original = source.slice(node.start, node.end);
+    rest = `${rest.slice(0, node.start)}${original.replace(/[^\n]/g, " ")}${rest.slice(node.end)}`;
+  }
+  return `${imports.join(" ")} export default async function () {${rest}\n}\n`;
+}
+
+// An import rebuilt on one line, without any comments it held.
+function importStatement(node: Extract<ProgramStatement, { type: "ImportDeclaration" }>): string {
+  const from = JSON.stringify(node.source.value);
+  const attributes =
+    node.attributes.length === 0
+      ? ""
+      : ` with { ${node.attributes
+          .map((attribute) => `${nameOf(attribute.key)}: ${JSON.stringify(attribute.value.value)}`)
+          .join(", ")} }`;
+  if (node.specifiers.length === 0) return `import ${from}${attributes};`;
+  const parts: string[] = [];
   const named: string[] = [];
-  for (const node of ast.body) {
+  for (const specifier of node.specifiers) {
+    if (specifier.type === "ImportDefaultSpecifier") parts.push(specifier.local.name);
+    else if (specifier.type === "ImportNamespaceSpecifier")
+      parts.push(`* as ${specifier.local.name}`);
+    else named.push(`${nameOf(specifier.imported)} as ${specifier.local.name}`);
+  }
+  if (named.length > 0) parts.push(`{ ${named.join(", ")} }`);
+  return `import ${parts.join(", ")} from ${from}${attributes};`;
+}
+
+function nameOf(node: { type: string; name?: string; value?: unknown }): string {
+  return node.type === "Identifier" ? String(node.name) : JSON.stringify(node.value);
+}
+
+function assertDefaultExport(body: readonly ProgramStatement[]): void {
+  const named: string[] = [];
+  for (const node of body) {
     if (node.type === "ExportDefaultDeclaration") return;
+    if (node.type === "ExportAllDeclaration") {
+      if (node.exported !== null && node.exported !== undefined) named.push(nameOf(node.exported));
+      continue;
+    }
     if (node.type !== "ExportNamedDeclaration") continue;
     for (const specifier of node.specifiers) {
-      const exported = specifier.exported;
-      const name = exported.type === "Identifier" ? exported.name : String(exported.value);
-      if (name === "default") return;
+      const name = nameOf(specifier.exported);
+      if (name === "default" || name === '"default"') return;
       named.push(name);
     }
     const declaration = node.declaration;
@@ -539,6 +607,7 @@ function assertDefaultExport(source: string): void {
   const shape =
     'Put the work in `export default async function (input) { ... }`, or re-export one with `export { default } from "./main.js"`.';
   if (named.length === 0) {
+    // Only `export * from`, which never re-exports a default.
     throw new Error(`The module has no default export, so there is nothing to run. ${shape}`);
   }
   const list = named.map((name) => `\`${name}\``);

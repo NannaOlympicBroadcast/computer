@@ -51,7 +51,7 @@ const result = await handle.result();
 // result.value = { value: 42, persisted: "42" }
 ```
 
-The source is a real ES module, with static imports and literal dynamic imports. The module needs a default export, or the run fails before it starts. A default-exported function is called with `options.input`, and any other default value is the result. To run code that's already in a file, re-export it with `export { default } from "./main.js"`.
+The source is a real ES module, with static imports and literal dynamic imports. A default-exported function is called with `options.input`, and any other default value is the result. To run code that's already in a file, re-export it with `export { default } from "./main.js"`. A module with named exports but no default fails before it starts.
 
 Put the module's work in that function. Each run loads the module first, then calls its default export, and the Workers runtime doesn't allow I/O while a module loads. So `node:fs` and host module calls only work once the function is running:
 
@@ -67,7 +67,16 @@ export default async function () {
 }
 ```
 
-A call made while the module loads fails the run with an error that names the call, even if the code catches the error, since the work it asked for never happened. The run also fails if a promise rejects and nothing has handled it by the time the function finishes. Top-level `await` is fine for anything that doesn't do I/O.
+A call made while the module loads fails the run with an error that names the call, even if the code catches the error, since the work it asked for never happened. The run also fails if a promise rejects and nothing has handled it by the time the function finishes. Top-level `await` is fine for anything that doesn't do I/O, and `console.log` at the top level is kept and printed once the module has loaded.
+
+A module with no exports at all is a script, and runs as the body of the default export instead. Its imports stay at the top and everything else moves into `export default async function () { ... }`, so top-level `await`, I/O, and `return` work, and line numbers stay as written. A script doesn't receive `options.input`:
+
+```js
+import { readFile } from "node:fs/promises";
+
+const text = await readFile("/workspace/a.txt", "utf8");
+return text.length;
+```
 
 The returned value becomes the result's `value` and must be JSON-compatible plain data. As with `JSON.stringify`, an `undefined` object field is left out, so `{ kept: 1, dropped: undefined }` completes as `{ kept: 1 }`, and returning `undefined` gives `null`. A function, a class instance such as a `Date`, an `undefined` array item, or a cycle fails the run. `options.input` is checked the same way.
 
@@ -184,7 +193,7 @@ The backend describes its modules for a model in `backend.description`, which `w
 
 ```text
 `command` is ECMAScript module source, run in an isolated JavaScript runtime. Relative imports resolve from `cwd` in the workspace.
-Put the work in `export default async function (input) { ... }` and call `node:fs` and the other modules below inside it, since the module's top level can't do I/O. To run a file you've already written, re-export it: `export { default } from "./main.js"`.
+Put the work in `export default async function (input) { ... }` and call `node:fs` and the other modules below inside it, since the module's top level can't do I/O. To run a file you've already written, re-export it: `export { default } from "./main.js"`. A module with no exports runs as the body of that function instead, so top-level `await`, I/O, and `return` work there.
 Code has no direct network access.
 
 Modules code can import:
@@ -236,6 +245,8 @@ modules: {
   ),
 }
 ```
+
+Code that guesses wrong is pointed back here. A call to an export a host module doesn't have fails with `is not a function`, and the run adds which `docs(...)` call lists the real ones. An import of a module that isn't configured, such as `node:child_process`, names `docs()`. `ws:git` refuses an option it doesn't take and lists the ones it does.
 
 The prebuilt modules all declare their exports, and `ws:tools` writes each tool's declaration from its description and input schema. An export with no declaration, such as one from a plain object of functions, is shown taking and returning `unknown`. `node:fs` and `node:fs/promises` are declared as the workspace implements them, which differs from Node.js in places: `stat().mtime` is a number, and there are no sync functions. A source module has no declarations, and a Node.js built-in is described as the Node.js API.
 
