@@ -23,11 +23,16 @@ export default defineConfig({
         find: "cloudflare:workers",
         replacement: resolve(__dirname, "test-helpers/cloudflare-workers-stub.ts"),
       },
-      // Match the package build: isomorphic-git's pako import is
-      // replaced with the Workers node:zlib-backed shim.
+      // Match the package build: isomorphic-git's pako and sha.js
+      // imports are replaced with the Workers node:zlib and
+      // node:crypto-backed shims.
       {
         find: "pako",
         replacement: resolve(__dirname, "src/git/pako-zlib-shim.ts"),
+      },
+      {
+        find: "sha.js/sha1.js",
+        replacement: resolve(__dirname, "src/git/sha1-crypto-shim.ts"),
       },
       // shell-modules.ts imports the generated groups by their
       // published @cloudflare/computer/shell/* subpath. Those

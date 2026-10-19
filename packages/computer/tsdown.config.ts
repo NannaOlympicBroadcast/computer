@@ -10,7 +10,9 @@
 //
 // The git entrypoint bundles isomorphic-git, but aliases pako to a
 // tiny node:zlib-backed compatibility layer so Workers don't carry
-// pako's JavaScript zlib implementation.
+// pako's JavaScript zlib implementation, and sha.js's SHA-1 to a
+// node:crypto one so they don't carry sha.js and the Buffer and
+// typed-array polyfills behind it.
 
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,6 +82,21 @@ export default defineConfig({
       // never imports; each group is built as its own entry above.
       /^@cloudflare\/computer\/shell\//,
     ],
+    // Every third-party package that ends up inside dist/. Adding to
+    // this list is a size decision, so the build fails rather than
+    // quietly bundling something new.
+    onlyBundle: [
+      "acorn",
+      "diff",
+      "isomorphic-git",
+      // isomorphic-git's own dependencies.
+      "async-lock",
+      "clean-git-ref",
+      "crc-32",
+      "diff3",
+      "ignore",
+      "pify",
+    ],
   },
   alias: {
     "@cloudflare/dofs": resolve(here, "../dofs/src/index.ts"),
@@ -87,6 +104,7 @@ export default defineConfig({
     "@cloudflare/computer-rpc": resolve(here, "../rpc/src/index.ts"),
     "@cloudflare/computer-rpc/driver": resolve(here, "../rpc/src/sync-driver.ts"),
     pako: resolve(here, "src/git/pako-zlib-shim.ts"),
+    "sha.js/sha1.js": resolve(here, "src/git/sha1-crypto-shim.ts"),
   },
   // ESM only. Nothing in-tree loads CJS — the example Worker, computerd,
   // and tests are all ESM — and a published-as-alpha API doesn't
@@ -103,5 +121,16 @@ export default defineConfig({
     // Code shared between entries is hoisted into separate chunks;
     // give them a self-explanatory name in the published tarball.
     chunkFileNames: "shared-[hash].js",
+    codeSplitting: {
+      groups: [
+        // Rolldown parks its runtime helpers (`__exportAll`,
+        // `__toESM`, ...) in whichever chunk it builds first. Left
+        // alone they land in the lazily loaded isomorphic-git chunk,
+        // and every chunk needing a helper then imports all of
+        // isomorphic-git statically: `./tools` paid ~560K for a
+        // 1K helper. A chunk of their own keeps that edge cheap.
+        { name: "runtime", test: /rolldown[\\/]runtime/ },
+      ],
+    },
   },
 });
