@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { defineConfig } from "vitest/config";
 
-import { shellModuleAliases } from "./test-helpers/shell-module-aliases.js";
+import { shellModuleAliases } from "./test-helpers/shell-module-aliases";
 
 export default defineConfig({
   resolve: {
@@ -13,7 +13,7 @@ export default defineConfig({
       // runtime — so alias to a throwing stub for any test that
       // incidentally pulls it through the import graph.
       {
-        find: "./proxy.js",
+        find: "./proxy",
         replacement: resolve(__dirname, "src/proxy-stub.ts"),
       },
       // The worker backend's entrypoint extends WorkerEntrypoint

@@ -27,8 +27,8 @@ export type {
   SQLiteWorkspaceProviderOptions,
 } from "@cloudflare/dofs";
 export { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
-export type { BackendHandle, WorkspaceBackend } from "./backend.js";
-export { TestBackend, type TestBackendOptions } from "./backends/test.js";
+export type { BackendHandle, WorkspaceBackend } from "./backend";
+export { TestBackend, type TestBackendOptions } from "./backends/test";
 export {
   getWorkspace,
   type RuntimeExecOptions,
@@ -37,9 +37,9 @@ export {
   type WorkspaceClient,
   type WorkspaceHandle,
   type WorkspaceRuntimeClient,
-} from "./client.js";
-export { decodeExecEvents, encodeExecEvents } from "./exec-wire.js";
-export { R2Bucket, type R2BucketBinding, type R2BucketOptions } from "./mounts/providers/r2.js";
+} from "./client";
+export { decodeExecEvents, encodeExecEvents } from "./exec-wire";
+export { R2Bucket, type R2BucketBinding, type R2BucketOptions } from "./mounts/providers/r2";
 export {
   WorkerBundle,
   type WorkerBundleEntry,
@@ -47,7 +47,7 @@ export {
   type WorkerBundleOptions,
   type WorkerBundleSource,
   type WorkerBundleTree,
-} from "./mounts/providers/worker-bundle.js";
+} from "./mounts/providers/worker-bundle";
 export type {
   EagerMount,
   Mount,
@@ -55,7 +55,7 @@ export type {
   MountContext,
   MountFactory,
   MountWriteAPI,
-} from "./mounts/types.js";
+} from "./mounts/types";
 export {
   createSyncLogger,
   DEFAULT_CPU_LIMIT_MS,
@@ -66,25 +66,25 @@ export {
   syncBlockLog,
   syncOperationLog,
   type TelemetryRecord,
-} from "./observe/sync-telemetry.js";
+} from "./observe/sync-telemetry";
 export {
   noopObserver,
   type WorkspaceAttributes,
   type WorkspaceAttributeValue,
   type WorkspaceObserver,
   type WorkspaceSpan,
-} from "./observe.js";
+} from "./observe";
 export {
   ArtifactsCLITarget,
   WorkspaceProxy,
   type WorkspaceProxyProps,
   WorkspaceServiceProxy,
   type WorkspaceServiceProxyProps,
-} from "./proxy.js";
-export type { WorkspaceEgressPolicy } from "./runtime/egress.js";
-export type { WorkspaceOutputOptions } from "./runtime/output-files.js";
-export type { TruncatedOutput } from "./runtime/output-spool.js";
-export type { WorkspaceBackendInfo } from "./runtime/runtime.js";
+} from "./proxy";
+export type { WorkspaceEgressPolicy } from "./runtime/egress";
+export type { WorkspaceOutputOptions } from "./runtime/output-files";
+export type { TruncatedOutput } from "./runtime/output-spool";
+export type { WorkspaceBackendInfo } from "./runtime/runtime";
 export type {
   ModuleExecutionEnvelope,
   ModuleExecutionInput,
@@ -111,10 +111,10 @@ export type {
   WorkspaceRuntimeStatus,
   WorkspaceRuntimeTruncation,
   WorkspaceRuntimeValue,
-} from "./runtime/types.js";
-export { decodeRuntimeEvents, encodeRuntimeEvent } from "./runtime/wire.js";
-export { type RawShellValue, type ShellValue, sh, shellQuote } from "./sh.js";
-export type { ExecEncoding, ExecSyncResult, KillSignal } from "./shell.js";
+} from "./runtime/types";
+export { decodeRuntimeEvents, encodeRuntimeEvent } from "./runtime/wire";
+export { type RawShellValue, type ShellValue, sh, shellQuote } from "./sh";
+export type { ExecEncoding, ExecSyncResult, KillSignal } from "./shell";
 export {
   WorkspaceAssetsStub,
   WorkspaceFilesystemStub,
@@ -122,16 +122,16 @@ export {
   WorkspaceRuntimeExecHandleStub,
   WorkspaceRuntimeStub,
   WorkspaceStub,
-} from "./stub.js";
+} from "./stub";
 export {
   type WithWorkspaceCtor,
   type WorkspaceLocalHost,
   type WorkspaceStubHost,
   withWorkspace,
-} from "./with-workspace.js";
+} from "./with-workspace";
 export {
   type ThinkWorkspaceCompatibility,
   Workspace,
   type WorkspaceGitFactory,
   type WorkspaceOptions,
-} from "./workspace.js";
+} from "./workspace";

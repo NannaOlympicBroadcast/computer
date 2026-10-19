@@ -10,7 +10,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-import type { ComputerdContainer, Env } from "./stub-soak-worker.js";
+import type { ComputerdContainer, Env } from "./stub-soak-worker";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}

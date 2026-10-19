@@ -1,14 +1,14 @@
 import { writeFileSync as nodeWriteFileSync } from "node:fs";
 import { posix } from "node:path";
-import type { FUSEBackend } from "./backend.js";
-import { buildFuseOptionString } from "./options.js";
+import type { FUSEBackend } from "./backend";
+import { buildFuseOptionString } from "./options";
 import {
   type LocalPassthroughOptions,
   type PassthroughStats,
   withLocalPassthrough,
-} from "./passthrough.js";
-import { createFuseTracer, type FuseTracer, wrapFuseOpsWithTracer } from "./tracer.js";
-import type { NodeVirtualFileSystem } from "./vfs.js";
+} from "./passthrough";
+import { createFuseTracer, type FuseTracer, wrapFuseOpsWithTracer } from "./tracer";
+import type { NodeVirtualFileSystem } from "./vfs";
 
 const ERRNO = {
   ENOENT: -2,

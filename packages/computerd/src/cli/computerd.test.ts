@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { expect, onTestFinished, test } from "vitest";
 
-import { resolveFuseBackend } from "../fuse/index.js";
+import { resolveFuseBackend } from "../fuse/index";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "../..");

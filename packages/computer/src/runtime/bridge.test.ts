@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { type BridgeResponse, WorkspaceRuntimeBridge } from "./bridge.js";
-import type { WorkspaceRuntimeCapability } from "./capability.js";
+import { type BridgeResponse, WorkspaceRuntimeBridge } from "./bridge";
+import type { WorkspaceRuntimeCapability } from "./capability";
 
 const encoder = new TextEncoder();
 const args = ["value"];

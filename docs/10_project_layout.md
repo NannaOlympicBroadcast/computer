@@ -245,7 +245,7 @@ so each example can declare its own dependencies and scripts.
 - **oxfmt.** Formats JS, TypeScript and JSON, configured in
   `.oxfmtrc.json` at the repo root. Markdown, YAML, HTML and CSS are
   left alone. No ESLint, no Prettier.
-- **tsdown.** Builds every package: the Workspace package's ESM entrypoints and declarations, `@cloudflare/dofs` and `@cloudflare/computer-rpc`, and the `computerd` CLI.
+- **tsdown.** Builds every package: the Workspace package's ESM entrypoints and declarations, `@cloudflare/dofs` and `@cloudflare/computer-rpc`, and the `computerd` CLI. Sources use extensionless relative imports under `moduleResolution: "bundler"`.
 - **esbuild.** Used by `packages/computerd/scripts/sea/bundle.mjs` to produce the single-file `computerd` SEA bundle.
 - **vitest.** Drives unit tests in every package. `computerd` additionally
   uses `node --experimental-strip-types --test` for some scripts

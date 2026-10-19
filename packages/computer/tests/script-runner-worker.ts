@@ -1,16 +1,16 @@
 import { DurableObject, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type { ShellRPC, SyncRPC } from "@cloudflare/computer-rpc";
-import type { WorkspaceBackend } from "../src/backend.js";
+import type { WorkspaceBackend } from "../src/backend";
 import {
   WorkerJavaScriptBackend,
   type WorkerJavaScriptBackendOptions,
-} from "../src/backends/worker-javascript/index.js";
-import { createGitClient } from "../src/git/index.js";
-import type { WorkspaceRuntimeValue, WorkspaceStub } from "../src/index.js";
-import { Workspace } from "../src/index.js";
-import { createArtifactsModule } from "../src/modules/artifacts.js";
-import { createContainerModule } from "../src/modules/container.js";
-import { createGitModule } from "../src/modules/git.js";
+} from "../src/backends/worker-javascript/index";
+import { createGitClient } from "../src/git/index";
+import type { WorkspaceRuntimeValue, WorkspaceStub } from "../src/index";
+import { Workspace } from "../src/index";
+import { createArtifactsModule } from "../src/modules/artifacts";
+import { createContainerModule } from "../src/modules/container";
+import { createGitModule } from "../src/modules/git";
 
 export interface Env {
   HOST: DurableObjectNamespace<HostDO>;

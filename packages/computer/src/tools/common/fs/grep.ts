@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { globList, globOne } from "./globs.js";
+import { globList, globOne } from "./globs";
 
 interface GrepContextLine {
   line: number;

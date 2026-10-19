@@ -14,7 +14,7 @@ import { expect, onTestFinished, test } from "vitest";
 // tests here pin the helper contract so a regression on either side
 // can be diagnosed without booting the daemon.
 
-import { createFileLogger, formatLogEntry, installLogging } from "./logger.js";
+import { createFileLogger, formatLogEntry, installLogging } from "./logger";
 
 test("formatLogEntry: stringifies primitives and Error objects", () => {
   expect(formatLogEntry("info", ["plain string"])).toMatch(/plain string/);

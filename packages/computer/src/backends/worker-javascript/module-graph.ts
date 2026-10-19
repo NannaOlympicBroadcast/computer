@@ -1,12 +1,12 @@
 import { parse } from "acorn";
 
-import type { WorkspaceRuntimeCapability } from "../../runtime/capability.js";
+import type { WorkspaceRuntimeCapability } from "../../runtime/capability";
 import type {
   WorkspaceModule,
   WorkspaceModuleFactory,
   WorkspaceModuleFunctions,
   WorkspaceRuntimeLoader,
-} from "../../runtime/types.js";
+} from "../../runtime/types";
 
 export type JavaScriptModuleMap = WorkspaceRuntimeLoader extends {
   load(code: { modules: infer Modules }): unknown;

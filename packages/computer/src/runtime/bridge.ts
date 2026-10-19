@@ -1,12 +1,12 @@
 import { RpcTarget } from "cloudflare:workers";
 
-import { utf8ByteLength, utf8Prefix } from "../text-truncation.js";
-import { assertRuntimeValue, type WorkspaceRuntimeCapability } from "./capability.js";
+import { utf8ByteLength, utf8Prefix } from "../text-truncation";
+import { assertRuntimeValue, type WorkspaceRuntimeCapability } from "./capability";
 import type {
   WorkspaceModuleCallContext,
   WorkspaceModuleFunctions,
   WorkspaceRuntimeValue,
-} from "./types.js";
+} from "./types";
 
 export class WorkspaceRuntimeBridge extends RpcTarget {
   readonly #capability: WorkspaceRuntimeCapability;

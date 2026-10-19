@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { globList } from "./globs.js";
+import { globList } from "./globs";
 
 interface FoundEntry {
   path: string;
