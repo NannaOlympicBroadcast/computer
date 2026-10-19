@@ -97,6 +97,12 @@ try {
     outdir: scratch,
     format: "esm",
     target: "esnext",
+    // The emitted chunks ship as strings in the modules table, where
+    // no downstream bundler can minify them, so this is the only
+    // chance. Identifiers are left alone: just-bash already ships
+    // mangled names, and keeping them keeps stack traces stable.
+    minifyWhitespace: true,
+    minifySyntax: true,
     platform: "neutral",
     mainFields: ["module", "main"],
     conditions: ["workerd", "worker", "import"],
