@@ -96,7 +96,7 @@ try {
     splitting: true,
     outdir: scratch,
     format: "esm",
-    target: "es2022",
+    target: "esnext",
     platform: "neutral",
     mainFields: ["module", "main"],
     conditions: ["workerd", "worker", "import"],
