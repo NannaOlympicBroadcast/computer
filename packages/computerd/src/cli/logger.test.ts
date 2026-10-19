@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { expect, onTestFinished, test } from "vitest";
 
@@ -116,19 +116,26 @@ test("installLogging: uncaughtException handler writes to LOG_FILE before exit",
   // error.
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "computerd-logger-"));
   const logPath = path.join(dir, "computerd.log");
-  const scriptPath = path.join(dir, "crash.cjs");
+  const scriptPath = path.join(dir, "crash.mjs");
   onTestFinished(() => fsp.rm(dir, { recursive: true, force: true }));
 
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const loggerPath = path.resolve(here, "../../dist/cli/logger.js");
+  // logger.ts imports only node builtins, so Node can run the source
+  // with type stripping and no build step. Copy it to `.mts` because
+  // this package is `"type": "commonjs"`, which would otherwise make
+  // Node load the `.ts` file as CommonJS.
+  const loggerPath = path.join(dir, "logger.mts");
+  await fsp.copyFile(path.resolve(here, "logger.ts"), loggerPath);
   const script = [
-    `const { installLogging } = require(${JSON.stringify(loggerPath)});`,
+    `import { installLogging } from ${JSON.stringify(pathToFileURL(loggerPath).href)};`,
     `installLogging(${JSON.stringify(logPath)});`,
     `setImmediate(() => { throw new Error("deliberate crash"); });`,
   ].join("\n");
   await fsp.writeFile(scriptPath, script, "utf8");
 
-  const child = spawn(process.execPath, [scriptPath], { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(process.execPath, ["--experimental-strip-types", scriptPath], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
   const code = await new Promise((resolve) => {
     child.once("exit", (c) => resolve(c));
   });
