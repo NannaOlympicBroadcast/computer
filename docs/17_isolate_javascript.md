@@ -443,7 +443,7 @@ The module's description lists the names code can import. With a function of too
 import { send, attachToTarget, spec, getDebugLog, clearDebugLog } from "ws:browser";
 ```
 
-`createBrowserModule({ browser, scope?, maxResultBytes? })` from `@cloudflare/computer/modules/browser` lets JavaScript drive a persistent Chrome browser over the Chrome DevTools Protocol. The browser belongs to the host: the module takes anything with the `BrowserSource` shape, a `name` and a `connect({ scope })` that returns a CDP connection plus the scope's active tab. `Browser` from `agents/browser` has that shape, so an agent passes its own browser:
+`createBrowserModule({ browser, scope?, maxResultBytes? })` from `@cloudflare/computer/modules/browser` lets JavaScript drive a persistent Chrome browser over the Chrome DevTools Protocol. The browser belongs to the host: the module takes anything with the `BrowserSource` shape, a `name` and a `session({ scope, maxResultBytes })` that starts a session for one run. `Browser` from `agents/browser` has that shape, so an agent passes its own browser, and neither package depends on the other:
 
 ```ts
 import { Browser, browserRun } from "agents/browser";
@@ -469,11 +469,11 @@ export default async function () {
 }
 ```
 
-`send({ method, params?, sessionId?, timeoutMs? })` returns a command's result without the JSON-RPC envelope. `sessionId: "active"` is the tab the scope is working in. The module remembers it between runs, and opens a new blank tab when the scope has none. `attachToTarget({ targetId })` makes another open tab active and returns a `sessionId` handle that keeps working in later runs. A session id from a raw `Target.attachToTarget` only lasts for one run. `Browser.close` and `Browser.crash` are refused, because the host decides when the browser ends.
+`send({ method, params?, sessionId?, timeoutMs? })` returns a command's result without the JSON-RPC envelope. `sessionId: "active"` is the tab the scope is working in. The session remembers it between runs, and opens a new blank tab when the scope has none. `attachToTarget({ targetId })` makes another open tab active and returns a `sessionId` handle that keeps working in later runs. A session id from a raw `Target.attachToTarget` only lasts for one run. `Browser.close` and `Browser.crash` are refused, because the host decides when the browser ends.
 
-Each run gets its own CDP connection, opened on its first call. When the run ends, the module saves the scope's active tab and closes the connection. The browser stays open. If the browser was replaced since the scope last used it, if another scope's tab closed or shares this one, or if the page opened tabs, the module says so on the run's standard error. The module's description, which the `exec` tool shows, covers the calls and the CDP mistakes models commonly make.
+A run's first call starts a session, and every call in the run goes to it. When the run ends, the module closes the session, which saves the scope's active tab and closes its connection. The browser stays open. If the session reports that the browser was replaced since the scope last used it, that another scope closed or shares this one's tab, or that the page opened tabs, the module says so on the run's standard error. The CDP rules above (the active tab, attach handles, refused commands, error hints) belong to the session, so `agents/browser`'s direct `createBrowserCDPTool` behaves the same way. The module's description, which the `exec` tool shows, covers the calls and the CDP mistakes models commonly make.
 
-`scope` keeps conversations that share one browser in their own tabs, while cookies and logins stay shared. A `Page.captureScreenshot` result over `maxResultBytes` (1,000,000 by default) fails with a note to capture the viewport or use JPEG. Keep it under the backend's `maxCapabilityBytes`.
+`scope` keeps conversations that share one browser in their own tabs, while cookies and logins stay shared. A `Page.captureScreenshot` result over `maxResultBytes` (1,000,000 by default in `agents/browser`) fails with a note to capture the viewport or use JPEG. Keep it under the backend's `maxCapabilityBytes`.
 
 ### `ws:container`
 

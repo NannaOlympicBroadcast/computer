@@ -58,35 +58,26 @@ function fakeContainerBackend(): WorkspaceBackend {
   };
 }
 
-// A browser with one tab that answers Runtime.evaluate with the tab it ran
-// in, and comes back replaced on the second connection, so a run sees a
+// A browser whose sessions answer send with the method they were sent,
+// and whose second session reports a replaced browser, so a run sees a
 // restart on standard error.
-let browserConnections = 0;
+let browserSessions = 0;
 const fakeBrowser: BrowserSource = {
   name: "fake",
-  async connect() {
-    browserConnections += 1;
-    const restarted = browserConnections === 2;
+  session() {
+    browserSessions += 1;
+    const restarted = browserSessions === 2;
     return {
-      restarted,
-      activeTargetId: "tab-1",
-      cdp: {
-        async send(method) {
-          if (method === "Target.getTargets") {
-            return { targetInfos: [{ targetId: "tab-1", type: "page", url: "about:blank" }] };
-          }
-          return { result: { value: method } };
-        },
-        async attachToTarget(targetId) {
-          return `session-${targetId}`;
-        },
-        getDebugLog: () => [],
-        clearDebugLog: () => {},
-        disconnect: () => {},
+      async send(input) {
+        return { result: { value: (input as { method: string }).method } };
       },
-      setActiveTarget: async () => true,
-      targetsInOtherScopes: async () => new Set<string>(),
+      async attachToTarget(input) {
+        return { sessionId: `target:${(input as { targetId: string }).targetId}` };
+      },
       spec: async () => ({ domains: [] }),
+      getDebugLog: async () => [],
+      clearDebugLog: async () => null,
+      close: async () => ({ restarted, newTabs: [], tabClosed: false, tabShared: false }),
     };
   },
 };
