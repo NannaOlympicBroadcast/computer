@@ -227,7 +227,7 @@ function optionsObject(
   return value;
 }
 
-const SEE_DOCS = ' docs("ws:git") from cf:computer shows every export\'s declaration.';
+const SEE_DOCS = ' docs("ws:git") from cloudflare:computer shows every export\'s declaration.';
 
 // The options each export takes, as its declaration lists them.
 const OPTION_KEYS: Readonly<Record<keyof typeof USAGE, readonly string[]>> = {

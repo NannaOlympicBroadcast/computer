@@ -1,7 +1,7 @@
 // What code in the isolate can learn about the modules it imports.
 //
 //   import * as git from "ws:git";
-//   import { docs, types } from "cf:computer";
+//   import { docs, types } from "cloudflare:computer";
 //   docs();          // every module, one line each
 //   docs(git);       // one module: its summary, declarations, examples
 //   types(git.cli);  // one export's declaration
@@ -10,21 +10,21 @@
 // ever holds a stub that forwards the call. The stub has nothing to
 // show, so the host sends each module's TypeScript declarations
 // instead. The backend renders them here, once per connection, and
-// the isolate reads the result as data: `cf:computer` looks entries
+// the isolate reads the result as data: `cloudflare:computer` looks entries
 // up, a host export prints its declaration, and `console.log` formats
 // values the way Node.js does.
 
 import type { WorkspaceModuleTypes } from "../../runtime/types.js";
 
 /** The built-in module code imports to read about the others. */
-export const COMPUTER_MODULE = "cf:computer";
+export const COMPUTER_MODULE = "cloudflare:computer";
 
 /** The internal module holding the catalog, the export registry, and the console formatter. */
 export const INTROSPECTION_MODULE = "workspace-introspection.js";
 
 /** One line for the backend's description, beside the other modules. */
 export const COMPUTER_DESCRIPTION =
-  "- `cf:computer`: how to call every other module. Read a module's docs before you first call it. `docs(module)` returns a module's TypeScript declarations and examples, and `docs()` lists every module. Pass a namespace (`import * as git from \"ws:git\"`), a specifier string, or one export. `types(...)` returns the declarations alone. Printing a host export with `console.log` shows its declaration too.";
+  "- `cloudflare:computer`: how to call every other module. Read a module's docs before you first call it. `docs(module)` returns a module's TypeScript declarations and examples, and `docs()` lists every module. Pass a namespace (`import * as git from \"ws:git\"`), a specifier string, or one export. `types(...)` returns the declarations alone. Printing a host export with `console.log` shows its declaration too.";
 
 /** What the isolate knows about every module it can import. */
 export interface ModuleCatalog {
@@ -269,7 +269,7 @@ export const NODE_FS_TYPES: WorkspaceModuleTypes = {
     '/** The same functions as `node:fs/promises`. */\nconst promises: typeof import("node:fs/promises");',
 };
 
-/** The declarations of `cf:computer`. */
+/** The declarations of `cloudflare:computer`. */
 export const COMPUTER_TYPES: WorkspaceModuleTypes = {
   ModuleTarget: `/**
  * A module specifier such as "ws:git", a namespace from \`import * as git from "ws:git"\`,
@@ -291,7 +291,7 @@ function types(target?: ModuleTarget): string;`,
 
 /**
  * The internal module the isolate reads the catalog from. Host stubs
- * register through it, `cf:computer` re-exports its lookups, and the
+ * register through it, `cloudflare:computer` re-exports its lookups, and the
  * runner formats console output with it.
  *
  * @param catalog - Every module code can import, rendered.
@@ -567,9 +567,9 @@ export function introspectionModuleSource(catalog: ModuleCatalog): string {
 }
 
 /**
- * The source of `cf:computer`, which re-exports the lookups.
+ * The source of `cloudflare:computer`, which re-exports the lookups.
  *
- * @param introspectionImport - The path from `cf:computer` to the introspection module.
+ * @param introspectionImport - The path from `cloudflare:computer` to the introspection module.
  * @returns The module's source.
  */
 export function computerModuleSource(introspectionImport: string): string {

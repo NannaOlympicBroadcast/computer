@@ -81,7 +81,7 @@ function javascriptBackend(
       "math-kit": "export const double = (value) => value * 2;",
       counter: "let count = 0; export const bump = () => ++count;",
       facade: `import { double } from "math-kit"; import { echo } from "ws:test-host"; export const both = async (value) => ({ doubled: double(value), echoed: await echo(value) });`,
-      "docs-kit": `import { docs } from "cf:computer"; export const gitDocs = () => docs("ws:git");`,
+      "docs-kit": `import { docs } from "cloudflare:computer"; export const gitDocs = () => docs("ws:git");`,
       "ws:git": createGitModule(),
       "ws:artifacts": createArtifactsModule(),
       "ws:container": createContainerModule(),

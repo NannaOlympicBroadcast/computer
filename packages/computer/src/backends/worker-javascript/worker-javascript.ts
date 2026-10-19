@@ -1109,7 +1109,7 @@ function runtimeWorkerModule(
       ? ""
       : `If that was a call into ${hostImports.join(" or ")}, ${hostImports
           .map((specifier) => `docs(${JSON.stringify(specifier)})`)
-          .join(" or ")} from cf:computer lists what it exports.`;
+          .join(" or ")} from cloudflare:computer lists what it exports.`;
   return `
     import { WorkerEntrypoint } from "cloudflare:workers";
     import { install, moduleScopeRefusals } from "workspace-capabilities.js";

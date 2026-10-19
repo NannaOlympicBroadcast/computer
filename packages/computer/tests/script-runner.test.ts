@@ -969,7 +969,7 @@ describe.each([
   });
 });
 
-// cf:computer and printed values. A host module's code runs in the
+// cloudflare:computer and printed values. A host module's code runs in the
 // Durable Object, so these check what the isolate can learn about it
 // without that code: its declarations, looked up or printed.
 describe.each([
@@ -987,7 +987,7 @@ describe.each([
   it("describes a host module from its namespace, its specifier, or one export", async () => {
     const result = await run(`
       import * as git from "ws:git";
-      import { docs, types } from "cf:computer";
+      import { docs, types } from "cloudflare:computer";
       export default () => ({
         byNamespace: docs(git),
         bySpecifier: docs("ws:git"),
@@ -1013,18 +1013,24 @@ describe.each([
 
   it("lists every module, and describes built-in and bundled ones", async () => {
     const result = await run(`
-      import { docs, types } from "cf:computer";
+      import { docs, types } from "cloudflare:computer";
       export default () => ({
         overview: docs(),
         fs: types("node:fs/promises"),
-        self: types("cf:computer"),
+        self: types("cloudflare:computer"),
         bundled: docs("math-kit"),
         node: docs("path"),
       });
     `);
     expect(result.status, result.stderr).toBe("completed");
     const value = result.value as Record<string, string>;
-    for (const specifier of ["node:fs/promises", "ws:git", "ws:tools", "math-kit", "cf:computer"]) {
+    for (const specifier of [
+      "node:fs/promises",
+      "ws:git",
+      "ws:tools",
+      "math-kit",
+      "cloudflare:computer",
+    ]) {
       expect(value.overview).toContain(`\`${specifier}\``);
     }
     expect(value.fs).toContain("function readFile(path: string): Promise<Uint8Array>;");
@@ -1036,7 +1042,7 @@ describe.each([
   it("declares ws:tools exports from each tool's input schema", async () => {
     const result = await run(`
       import { get_weather } from "ws:tools";
-      import { types } from "cf:computer";
+      import { types } from "cloudflare:computer";
       export default async () => ({ declared: types(get_weather), called: (await get_weather({ city: "Lisbon" })).text });
     `);
     expect(result.status, result.stderr).toBe("completed");
@@ -1051,7 +1057,7 @@ describe.each([
 
   it("shows exports with no declarations as taking unknown", async () => {
     const result = await run(`
-      import { types } from "cf:computer";
+      import { types } from "cloudflare:computer";
       export default () => types("ws:test-host");
     `);
     expect(result).toMatchObject({
@@ -1060,7 +1066,7 @@ describe.each([
     });
   });
 
-  it("lets a configured module import cf:computer", async () => {
+  it("lets a configured module import cloudflare:computer", async () => {
     const result = await run(`
       import { gitDocs } from "docs-kit";
       export default () => gitDocs();
@@ -1075,7 +1081,7 @@ describe.each([
   // inside the isolate.
   it("names the modules there are when asked about one that isn't", async () => {
     const result = await run(`
-      import { docs } from "cf:computer";
+      import { docs } from "cloudflare:computer";
       export default () => { try { docs("ws:nope"); } catch (error) { return error.message; } };
     `);
     expect(result).toMatchObject({
@@ -1086,7 +1092,7 @@ describe.each([
 
   it("refuses a function no host module exports", async () => {
     const result = await run(`
-      import { docs } from "cf:computer";
+      import { docs } from "cloudflare:computer";
       export default () => { try { docs(() => 1); } catch (error) { return error.message; } };
     `);
     expect(result).toMatchObject({
@@ -1095,14 +1101,16 @@ describe.each([
     });
   });
 
-  it("refuses another cf: module before running", async () => {
+  it("refuses another cloudflare: module before running", async () => {
     const response = await runtime({
-      source: `import { x } from "cf:other"; export default () => x;`,
+      source: `import { x } from "cloudflare:workers"; export default () => x;`,
       cwd: "/workspace",
       backend,
     });
     expect(response.status).toBe(400);
-    expect(await response.text()).toContain('The only one is \\"cf:computer\\"');
+    expect(await response.text()).toContain(
+      'The only cloudflare: module code can import is \\"cloudflare:computer\\"',
+    );
   });
 });
 
@@ -1167,7 +1175,7 @@ describe("console output", () => {
   it("runs a module with no exports as a script, for what it prints", async () => {
     const result = await output(`
       import * as git from "ws:git";
-      import { docs } from "cf:computer";
+      import { docs } from "cloudflare:computer";
       console.log(git);
       console.log(docs().split("\\n")[0]);
     `);
@@ -1184,7 +1192,7 @@ describe("console output", () => {
     expect(result).toMatchObject({
       status: "failed",
       stderr: expect.stringContaining(
-        'is not a function. If that was a call into ws:git, docs("ws:git") from cf:computer lists what it exports.',
+        'is not a function. If that was a call into ws:git, docs("ws:git") from cloudflare:computer lists what it exports.',
       ),
     });
   });

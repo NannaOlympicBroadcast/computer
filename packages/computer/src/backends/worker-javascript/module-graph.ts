@@ -114,7 +114,7 @@ export interface ParsedModules {
 const FILESYSTEM_SUMMARY =
   "the workspace's files. `readFile`, `writeFile`, `mkdir`, `rm`, `readdir`, `stat`, `lstat`, `readlink`, `symlink`, `chmod`, and `access`. Async only.";
 const FILESYSTEM_DESCRIPTION = `- \`node:fs/promises\` (also \`node:fs\`): ${FILESYSTEM_SUMMARY}`;
-const COMPUTER_SUMMARY = COMPUTER_DESCRIPTION.replace(/^- `cf:computer`: /, "");
+const COMPUTER_SUMMARY = COMPUTER_DESCRIPTION.replace(/^- `cloudflare:computer`: /, "");
 
 /**
  * Parse the backend's `modules` option: split it into bundled source
@@ -139,9 +139,9 @@ export function parseModules(modules: Readonly<Record<string, WorkspaceModule>>)
     ) {
       throw new Error(`Module ${JSON.stringify(specifier)} is built in and cannot be replaced.`);
     }
-    if (specifier.startsWith("cf:")) {
+    if (specifier.startsWith("cloudflare:")) {
       throw new Error(
-        `Module ${JSON.stringify(specifier)} uses the cf:* namespace, which is only for built-in modules.`,
+        `Module ${JSON.stringify(specifier)} uses the cloudflare:* namespace, which is only for built-in modules.`,
       );
     }
     if (typeof module === "string") {
@@ -206,7 +206,7 @@ export interface ModuleCatalogInput {
 
 /**
  * Describe every module code can import on one connection, for
- * `cf:computer`. Built once when the backend connects, alongside the
+ * `cloudflare:computer`. Built once when the backend connects, alongside the
  * host module functions, so the two agree.
  *
  * @param input - The parsed modules and what their factories built.
@@ -263,7 +263,7 @@ export function moduleCatalog(input: ModuleCatalogInput): ModuleCatalog {
     types: COMPUTER_TYPES,
     examples: [
       'import * as git from "ws:git";',
-      'import { docs } from "cf:computer";',
+      'import { docs } from "cloudflare:computer";',
       "console.log(docs(git));",
     ],
   });
@@ -326,7 +326,7 @@ export interface BuildModuleGraphOptions {
   emptyHostModules?: ReadonlySet<string>;
   /** Whether the Dynamic Worker has the Node.js built-ins. */
   nodeModules: boolean;
-  /** What `cf:computer` tells code about every module, from {@link moduleCatalog}. */
+  /** What `cloudflare:computer` tells code about every module, from {@link moduleCatalog}. */
   catalog: ModuleCatalog;
   maxSourceBytes: number;
   maxCapabilityBytes: number;
@@ -442,9 +442,9 @@ export async function buildModuleGraph(options: BuildModuleGraphOptions) {
       if (specifier === CAPABILITIES_MODULE || specifier === INTROSPECTION_MODULE) {
         throw new Error(`Module ${JSON.stringify(specifier)} is reserved for Workspace internals.`);
       }
-      if (specifier.startsWith("cf:")) {
+      if (specifier.startsWith("cloudflare:")) {
         throw new Error(
-          `Module ${JSON.stringify(specifier)} is not a built-in module. The only one is "${COMPUTER_MODULE}".`,
+          `Module ${JSON.stringify(specifier)} is not available here. The only cloudflare: module code can import is "${COMPUTER_MODULE}".`,
         );
       }
       if (options.emptyHostModules?.has(specifier)) {
@@ -733,7 +733,7 @@ function isInternalModuleName(name: string) {
     name.endsWith(`/${INTROSPECTION_MODULE}`) ||
     name.endsWith(`/${RUNNER_MODULE}`) ||
     basename.startsWith("ws:") ||
-    basename.startsWith("cf:")
+    basename.startsWith("cloudflare:")
   );
 }
 

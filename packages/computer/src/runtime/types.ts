@@ -68,7 +68,7 @@ export interface WorkspaceModuleFactory {
   readonly description?: string;
   /**
    * TypeScript declarations for the module's exports. Code reads them
-   * with `docs` and `types` from `cf:computer`, and by printing an
+   * with `docs` and `types` from `cloudflare:computer`, and by printing an
    * export. An export with no declaration is shown as taking and
    * returning `unknown`.
    */

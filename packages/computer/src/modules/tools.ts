@@ -37,7 +37,7 @@ export interface ToolBinding {
   /**
    * The JSON Schema of the tool's one object of arguments. It becomes
    * the export's TypeScript declaration, which code reads with
-   * `cf:computer`. Without it, the export takes any object.
+   * `cloudflare:computer`. Without it, the export takes any object.
    */
   readonly inputSchema?: object;
   /**

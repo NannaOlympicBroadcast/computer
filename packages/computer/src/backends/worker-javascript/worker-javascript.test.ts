@@ -1049,21 +1049,26 @@ describe("WorkerJavaScriptBackend", () => {
     expect(backend.description).toContain("- `ws:plain`: a host module.");
   });
 
-  it("names cf:computer among its modules", () => {
+  it("names cloudflare:computer among its modules", () => {
     const backend = new WorkerJavaScriptBackend({ loader: throwingLoader("must not load") });
 
-    expect(backend.description).toContain("- `cf:computer`: how to call every other module.");
+    expect(backend.description).toContain(
+      "- `cloudflare:computer`: how to call every other module.",
+    );
   });
 
-  it.each(["cf:computer", "cf:other"])("refuses a configured module named %s", (specifier) => {
-    expect(
-      () =>
-        new WorkerJavaScriptBackend({
-          loader: throwingLoader("must not load"),
-          modules: { [specifier]: "export const x = 1;" },
-        }),
-    ).toThrow(specifier === "cf:computer" ? /is built in/ : /cf:\* namespace/);
-  });
+  it.each(["cloudflare:computer", "cloudflare:workers"])(
+    "refuses a configured module named %s",
+    (specifier) => {
+      expect(
+        () =>
+          new WorkerJavaScriptBackend({
+            loader: throwingLoader("must not load"),
+            modules: { [specifier]: "export const x = 1;" },
+          }),
+      ).toThrow(specifier === "cloudflare:computer" ? /is built in/ : /cloudflare:\* namespace/);
+    },
+  );
 
   it("lists the Node.js built-ins code can import", () => {
     const backend = new WorkerJavaScriptBackend({ loader: throwingLoader("must not load") });
@@ -1511,7 +1516,7 @@ describe("WorkerJavaScriptBackend", () => {
           `import { execSync } from "node:child_process"; execSync("git status");`,
         ),
       ).rejects.toThrow(
-        'Module "node:child_process" is not configured for the worker-javascript backend. `docs()` from cf:computer lists the modules code can import.',
+        'Module "node:child_process" is not configured for the worker-javascript backend. `docs()` from cloudflare:computer lists the modules code can import.',
       );
     });
 

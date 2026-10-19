@@ -154,7 +154,7 @@ Caller source can import four kinds of module, and all of them are fixed when th
 
 | Kind | Configured with | Runs in | Example |
 | --- | --- | --- | --- |
-| Built in | Always installed | The isolate, backed by the Workspace | `node:fs`, `node:fs/promises`, `cf:computer` |
+| Built in | Always installed | The isolate, backed by the Workspace | `node:fs`, `node:fs/promises`, `cloudflare:computer` |
 | Node.js | `nodejs_compat` in `compatibilityFlags`, the default | The isolate, provided by the runtime | `node:path`, `node:crypto` |
 | Source | `modules: { name: "source" }` | The isolate | a bundled library |
 | Host | `modules: { "ws:name": { fn } }`, or a factory | The Durable Object | `ws:git`, `ws:container`, `ws:tools`, your own |
@@ -202,21 +202,21 @@ Modules code can import:
 - `ws:git`: The workspace's Git repository: `status({ dir })`, ...
 - `ws:container`: Runs shell commands in a full Linux container that shares this workspace's files. ...
 - `ws:weather`: exports `forecast`.
-- `cf:computer`: `docs(module)` returns a module's TypeScript declarations and examples, ...
+- `cloudflare:computer`: `docs(module)` returns a module's TypeScript declarations and examples, ...
 - Node.js built-ins: `node:path`, `node:url`, ... Bare names such as `path` work too.
 ```
 
 A factory adds its own text through a `description` property, as the prebuilt modules do. The backend reads it each time it describes itself, not once when it is constructed, so a factory can define `description` as a getter and describe something that exists only later, as `ws:tools` does with the agent's tools. An object of functions is listed by its export names; say more about it in the `exec` tool's backend description if the model needs it.
 
-The description is one line per module, so it stays short in every prompt. The rest is in `cf:computer`, below.
+The description is one line per module, so it stays short in every prompt. The rest is in `cloudflare:computer`, below.
 
-### `cf:computer`
+### `cloudflare:computer`
 
-A host module's code runs in the Durable Object, so the isolate only holds stubs that forward each call. `String(fn)` on one shows nothing useful about how to call it. `cf:computer` is built in and gives code each module's TypeScript declarations instead:
+A host module's code runs in the Durable Object, so the isolate only holds stubs that forward each call. `String(fn)` on one shows nothing useful about how to call it. `cloudflare:computer` is built in and gives code each module's TypeScript declarations instead:
 
 ```js
 import * as git from "ws:git";
-import { docs, types } from "cf:computer";
+import { docs, types } from "cloudflare:computer";
 
 export default () => ({
   modules: docs(),          // every module, one line each
@@ -250,7 +250,7 @@ Code that guesses wrong is pointed back here. A call to an export a host module 
 
 The prebuilt modules all declare their exports, and `ws:tools` writes each tool's declaration from its description and input schema. An export with no declaration, such as one from a plain object of functions, is shown taking and returning `unknown`. `node:fs` and `node:fs/promises` are declared as the workspace implements them, which differs from Node.js in places: `stat().mtime` is a number, and there are no sync functions. A source module has no declarations, and a Node.js built-in is described as the Node.js API.
 
-The backend reads `types` and `examples` when it connects, with the functions the factory builds, so the two always agree. Like `description`, either can be a getter. Every specifier under `cf:` is reserved: no configured module may use one, and importing any other than `cf:computer` fails before the Worker is created.
+The backend reads `types` and `examples` when it connects, with the functions the factory builds, so the two always agree. Like `description`, either can be a getter. Every specifier under `cloudflare:` is reserved: no configured module may use one, and importing any other, such as `cloudflare:workers`, fails before the Worker is created.
 
 ### Built-in filesystem
 
@@ -424,7 +424,7 @@ On a backend with `access: "read"`, only tools marked `readOnly` run. Every othe
 
 The module's description lists the names code can import. With a function of tools, the function is called again each time the backend describes itself, so the `exec` tool, built after the Workspace, sees the current list. A list is read as given; any other iterable may be single-use, so it is not read for the description, and neither is a function that throws.
 
-A binding may also carry the tool's `description` and its `inputSchema` as JSON Schema, and `forPiTools()` and `forAISDKTools()` fill both in. The module then declares each export for `cf:computer`, so `types(read)` shows the arguments the tool takes:
+A binding may also carry the tool's `description` and its `inputSchema` as JSON Schema, and `forPiTools()` and `forAISDKTools()` fill both in. The module then declares each export for `cloudflare:computer`, so `types(read)` shows the arguments the tool takes:
 
 ```ts
 /** Read a file. */
