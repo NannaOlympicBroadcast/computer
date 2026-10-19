@@ -728,7 +728,7 @@ async function loadDefaultHTTP(): Promise<object> {
 
 async function loadCreatePatch(): Promise<CreatePatchFn> {
   try {
-    const mod = await import("diff");
+    const mod = await import("./create-patch");
     return mod.createPatch;
   } catch (cause) {
     throw new Error("Failed to load @cloudflare/computer/git's bundled diff implementation.", {
