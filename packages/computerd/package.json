@@ -4,9 +4,9 @@
   "description": "Computer daemon CLI and FUSE mount. Source-only; the distributable lives at @cloudflare/computer-computerd-linux-x64.",
   "license": "MIT",
   "private": true,
-  "type": "commonjs",
+  "type": "module",
   "bin": {
-    "computerd": "./dist/cli/computerd.cjs"
+    "computerd": "./dist/cli/computerd.js"
   },
   "files": [
     "dist",

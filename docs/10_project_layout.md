@@ -165,12 +165,12 @@ packages/computerd/
 │   └── computerd/
 │       ├── computerd-linux-x64
 │       └── computerd-macos-x64
-├── tsdown.config.mts                # → dist/cli/computerd.cjs
+├── tsdown.config.ts                 # → dist/cli/computerd.js
 ├── tsconfig.json
 └── package.json
 ```
 
-Build pipeline: tsdown bundles `src/cli/computerd.ts` into `dist/cli/computerd.cjs`;
+Build pipeline: tsdown bundles `src/cli/computerd.ts` into `dist/cli/computerd.js`;
 `scripts/build-bin.mjs` together with `scripts/sea/bundle.mjs`
 produces the Node SEA single-file binary at
 `artifacts/computerd/computerd-{linux,macos}-x64`.

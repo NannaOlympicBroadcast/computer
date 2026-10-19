@@ -121,13 +121,10 @@ test("installLogging: uncaughtException handler writes to LOG_FILE before exit",
 
   const here = path.dirname(fileURLToPath(import.meta.url));
   // logger.ts imports only node builtins, so Node can run the source
-  // with type stripping and no build step. Copy it to `.mts` because
-  // this package is `"type": "commonjs"`, which would otherwise make
-  // Node load the `.ts` file as CommonJS.
-  const loggerPath = path.join(dir, "logger.mts");
-  await fsp.copyFile(path.resolve(here, "logger.ts"), loggerPath);
+  // with type stripping and no build step.
+  const loggerUrl = pathToFileURL(path.resolve(here, "logger.ts")).href;
   const script = [
-    `import { installLogging } from ${JSON.stringify(pathToFileURL(loggerPath).href)};`,
+    `import { installLogging } from ${JSON.stringify(loggerUrl)};`,
     `installLogging(${JSON.stringify(logPath)});`,
     `setImmediate(() => { throw new Error("deliberate crash"); });`,
   ].join("\n");
