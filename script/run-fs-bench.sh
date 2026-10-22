@@ -15,6 +15,8 @@
 # LOCAL_ONLY=1 runs the bench under /tmp/workspace/bench and lists that
 # directory in MOUNT_IGNORE, to measure local-only paths.
 # COMPUTERD_FUSE_PASSTHROUGH=0 measures them without kernel passthrough.
+# NATIVE_ROOTS=1, with LOCAL_ONLY=1, also lists it in MOUNT_NATIVE, so the
+# bench runs inside a bind-mounted native root.
 set -u
 apt-get update >/dev/null 2>&1
 apt-get install -y --no-install-recommends fuse3 attr util-linux coreutils findutils git ca-certificates curl npm >/dev/null 2>&1
@@ -29,6 +31,10 @@ if [ "${LOCAL_ONLY:-0}" = "1" ]; then
   BENCH_MOUNT=/tmp/workspace/bench
   MOUNT_IGNORE=/bench
 fi
+MOUNT_NATIVE=""
+if [ "${NATIVE_ROOTS:-0}" = "1" ]; then
+  MOUNT_NATIVE="$MOUNT_IGNORE"
+fi
 # Forward optional tracer config to computerd. When COMPUTERD_FUSE_TRACE=summary is
 # set the daemon writes a JSON summary on unmount or SIGUSR2; with
 # COMPUTERD_FUSE_TRACE_FILE pointed at a host-mounted path the trace survives
@@ -37,6 +43,7 @@ COMPUTERD_FUSE_TRACE="${COMPUTERD_FUSE_TRACE:-}" \
   COMPUTERD_FUSE_TRACE_FILE="${COMPUTERD_FUSE_TRACE_FILE:-}" \
   COMPUTERD_FUSE_PASSTHROUGH="${COMPUTERD_FUSE_PASSTHROUGH:-}" \
   MOUNT_IGNORE="$MOUNT_IGNORE" \
+  MOUNT_NATIVE="$MOUNT_NATIVE" \
   PORT=45678 MOUNT_POINT=/tmp/workspace /usr/local/bin/computerd >/tmp/computerd.log 2>&1 &
 COMPUTERD_PID=$!
 
@@ -59,6 +66,12 @@ fi
 mkdir -p "$BENCH_MOUNT"
 MOUNT="$BENCH_MOUNT" BASE=/tmp/baseline /usr/local/bin/fs-bench
 status=$?
+
+if [ -n "$MOUNT_NATIVE" ]; then
+  echo "[bench] native roots:"
+  grep " $BENCH_MOUNT " /proc/self/mountinfo | cut -d' ' -f4,5 || echo "  (not mounted)"
+  curl -fsS http://127.0.0.1:45678/__computerd/stats | tr '{,' '\n\n' | grep -E '"(mounts|failures|active)"' || true
+fi
 
 # Ask computerd to dump the FUSE trace (if enabled) before the SIGTERM. The
 # trace handler is async, so give it a moment to land on disk before we

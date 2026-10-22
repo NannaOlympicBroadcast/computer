@@ -17,11 +17,17 @@ MOUNT_IGNORE=""
 if [ "${IGNORE_NODE_MODULES:-0}" = "1" ]; then
   MOUNT_IGNORE="/ignored/*/node_modules"
 fi
+# NATIVE_ROOTS=1 bind-mounts those node_modules too (MOUNT_NATIVE).
+MOUNT_NATIVE=""
+if [ "${NATIVE_ROOTS:-0}" = "1" ]; then
+  MOUNT_NATIVE="$MOUNT_IGNORE"
+fi
 
 COMPUTERD_FUSE_TRACE="${COMPUTERD_FUSE_TRACE:-}" \
   COMPUTERD_FUSE_TRACE_FILE="${COMPUTERD_FUSE_TRACE_FILE:-}" \
   COMPUTERD_FUSE_PASSTHROUGH="${COMPUTERD_FUSE_PASSTHROUGH:-}" \
   MOUNT_IGNORE="$MOUNT_IGNORE" \
+  MOUNT_NATIVE="$MOUNT_NATIVE" \
   PORT=45678 MOUNT_POINT=/tmp/workspace /usr/local/bin/computerd >/tmp/computerd.log 2>&1 &
 COMPUTERD_PID=$!
 
@@ -39,12 +45,17 @@ if ! kill -0 "$COMPUTERD_PID" 2>/dev/null; then
   exit 1
 fi
 
-MOUNT=/tmp/workspace BASE=/tmp/baseline /usr/local/bin/npm-bench
+COMPUTERD_URL=""
+if [ -n "$MOUNT_NATIVE" ]; then
+  COMPUTERD_URL=http://127.0.0.1:45678
+fi
+
+COMPUTERD_URL="$COMPUTERD_URL" MOUNT=/tmp/workspace BASE=/tmp/baseline /usr/local/bin/npm-bench
 status=$?
 
 if [ -n "$MOUNT_IGNORE" ]; then
   echo "[bench] passthrough status:"
-  curl -fsS http://127.0.0.1:45678/__computerd/info | tr ',' '\n' | grep -i passthrough || true
+  curl -fsS http://127.0.0.1:45678/__computerd/info | tr ',' '\n' | grep -i -E 'passthrough|nativeRoots|"mounts"|"failures"' || true
 fi
 
 kill -USR2 "$COMPUTERD_PID" 2>/dev/null && sleep 1

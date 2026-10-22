@@ -88,6 +88,7 @@ warm_npm_cache() {
       # Nothing to warm for the synthetic scenario.
       ;;
   esac
+  release_native_roots
   rm -rf "$warmdir"
   echo "[bench] cache warm for $scenario complete"
 }
@@ -115,6 +116,16 @@ stop_heartbeat() {
   fi
 }
 
+# A native root (MOUNT_NATIVE) is a mount point, and rmdir of a mount
+# point fails with EBUSY, so `rm -rf` of a previous run's directory stops
+# at its node_modules. Detach them first; COMPUTERD_URL is set when the
+# daemon mounts native roots. A detach is always safe.
+release_native_roots() {
+  if [ -n "${COMPUTERD_URL:-}" ]; then
+    curl -fsS -X POST "$COMPUTERD_URL/__computerd/native-roots/detach" >/dev/null 2>&1 || true
+  fi
+}
+
 # Run a single npm install and return timing + stats via echoed JSON fields.
 run_install() {
   local scenario="$1"
@@ -123,6 +134,7 @@ run_install() {
   local run_idx="$4"
 
   local work_dir="${target_dir}/run-${run_idx}"
+  release_native_roots
   rm -rf "$work_dir"
   mkdir -p "$work_dir"
 

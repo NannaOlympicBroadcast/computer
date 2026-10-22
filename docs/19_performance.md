@@ -122,6 +122,51 @@ transfer that no longer follows it.
 > and `script/run-npm-bench.sh` (with `IGNORE_NODE_MODULES=1`) reproduce
 > them.
 
+### Native roots (`MOUNT_NATIVE`)
+
+Passthrough leaves metadata on computerd's event loop. A native root
+removes that too: the directory is bind-mounted from the container's
+disk, so nothing under it reaches computerd at all. See
+[`computerd`: Native roots](../packages/computerd/README.md#native-roots-mount_native).
+
+These runs were all taken on the same machine, one after another. The
+raw-disk column is the median of the baselines measured alongside each
+run, and the local-only columns have passthrough on.
+
+| fs-bench scenario (median, ms) | synced | local-only, passthrough | local-only, native root | raw disk |
+| --- | ---: | ---: | ---: | ---: |
+| create 1000 files | 441.4 | 317.6 | **13.7** | 14.7 |
+| stat 1000 files | 851.1 | 674.5 | **347.9** | 363.2 |
+| rm 1000 files | 600.9 | 320.2 | **20.9** | 22.7 |
+| mkdir tree (10x10x10) | 682.7 | 607.1 | **303.6** | 310.7 |
+| find tree | 674.5 | 554.2 | **304.5** | 305.6 |
+| write 64 MiB | 50.7 | 18.4 | **15.4** | 16.9 |
+| copy 64 MiB | 214.6 | 64.9 | **31.6** | 33.2 |
+| read 64 MiB | 96.6 | 19.6 | **24.0** | 22.7 |
+| pure read 64 MiB | 53.6 | 6.0 | **8.1** | 6.1 |
+| pure copy 64 MiB | 151.9 | 41.9 | **14.9** | 14.1 |
+| overwrite 64 MiB | 67.3 | 17.1 | **16.8** | 16.2 |
+| git init + commit 100 files | 192.5 | 108.4 | **12.5** | 12.4 |
+| git clone (shallow, ~1MB) | 710.8 | 561.7 | **668.2** | 558.3 |
+| npm init + tiny install | 184.3 | 178.3 | **180.5** | 181.8 |
+
+| Install (median, ms) | synced path | local-only, passthrough | local-only, native root | raw disk |
+| --- | ---: | ---: | ---: | ---: |
+| `express` (589 files), install | 550 | 470 | **392** | 379 |
+| `express` (589 files), read back | 176 | 73 | **6** | 6 |
+| front-end toolchain (5,428 files, 91 MB), install | 3,643 | 2,165 | **1,365** | 1,336 |
+| front-end toolchain (5,428 files, 91 MB), read back | 2,114 | 707 | **52** | 50 |
+
+Under a native root every scenario lands at raw disk, within run-to-run
+noise, where passthrough alone left metadata-heavy work at 15 to 25
+times raw. `git clone` is dominated by the network and moves with it.
+
+> [!NOTE]
+> Same caveat as above: an arm64 Linux 7.0 virtual machine on a laptop
+> (OrbStack), not Cloudflare Containers. Reproduce with
+> `script/run-fs-bench.sh` (`LOCAL_ONLY=1 NATIVE_ROOTS=1`) and
+> `script/run-npm-bench.sh` (`IGNORE_NODE_MODULES=1 NATIVE_ROOTS=1`).
+
 Writeback caching would cut metadata round trips further on writes. It
 stays off: libfuse 3 can negotiate it, but it changes write behavior for
 the synced mount as well, which is a separate decision.
