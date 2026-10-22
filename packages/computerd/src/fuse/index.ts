@@ -8,13 +8,18 @@ export type {
   MountIgnoreConfig,
   MountIgnoreEnv,
   MountIgnoreInfo,
+  NativeRootsConfig,
+  NativeRootsInfo,
   PassthroughStatus,
 } from "./ignore-config.js";
 export {
   defaultIgnoreRoot,
   describeMountIgnore,
+  MountNativeError,
   resolveMountIgnoreConfig,
 } from "./ignore-config.js";
+export type { NativeRoots, NativeRootsOptions, NativeRootsStats } from "./native-roots.js";
+export { createNativeRoots } from "./native-roots.js";
 export type { LocalPassthrough, LocalPassthroughOptions, PassthroughStats } from "./passthrough.js";
 export { withLocalPassthrough } from "./passthrough.js";
 export type { ResolvedStore, StoreMode } from "./store.js";

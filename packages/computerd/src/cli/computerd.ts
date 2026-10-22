@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { timingSafeEqual } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
@@ -14,12 +14,14 @@ import { WebSocket, WebSocketServer } from "ws";
 import { Runner } from "../exec/index.js";
 import type { ExecEvent as ComputerdExecEvent } from "../exec/types.js";
 import {
+  createNativeRoots,
   createNodeVirtualFileSystem,
   describeMountIgnore,
   type FUSEBackend,
   type FuseMount,
   type MountIgnoreInfo,
   mountFuse,
+  type NativeRoots,
   parseFuseMountMode,
   parseStoreMode,
   type ResolvedStore,
@@ -202,6 +204,7 @@ function createHTTPServer(
   secret: string | undefined,
   getStats?: () => Record<string, unknown>,
   checkpoint?: () => { walFrames: number; sizeBytes: number; durationMs: number },
+  nativeRoots?: Pick<NativeRoots, "detach">,
 ): HTTPHandle {
   // Holds the current outbound capnweb session opened via /connect.
   // Re-POSTing /connect (e.g. after a DO hibernate + new incarnation)
@@ -278,6 +281,21 @@ function createHTTPServer(
           "content-type": "text/plain; charset=utf-8",
         });
       }
+      return;
+    }
+
+    // /__computerd/native-roots/detach — lazily detach one native root,
+    // or all of them, so a caller can remove or rename the directory. A
+    // detach is always safe: the FUSE layer serves the same directory.
+    if (path === "/__computerd/native-roots/detach") {
+      if (request.method !== "POST") {
+        send(response, 405, "method not allowed\n", {
+          allow: "POST",
+          "content-type": "text/plain; charset=utf-8",
+        });
+        return;
+      }
+      void handleNativeRootsDetach(request, response, nativeRoots);
       return;
     }
 
@@ -575,6 +593,35 @@ async function handleConnect(
   });
 }
 
+// POST { path?: string } with a mount-relative path, or no body to detach
+// every native root. Answers 200 with what was detached; a path that is
+// not a native root detaches nothing and is not an error.
+async function handleNativeRootsDetach(
+  request: IncomingMessage,
+  response: ServerResponse,
+  nativeRoots: Pick<NativeRoots, "detach"> | undefined,
+): Promise<void> {
+  let body: { path?: unknown };
+  try {
+    body = await readJson<{ path?: unknown }>(request);
+  } catch (error) {
+    send(response, 400, `invalid JSON body: ${(error as Error).message}\n`, {
+      "content-type": "text/plain; charset=utf-8",
+    });
+    return;
+  }
+  if (body.path !== undefined && typeof body.path !== "string") {
+    send(response, 400, "'path' must be a string when present\n", {
+      "content-type": "text/plain; charset=utf-8",
+    });
+    return;
+  }
+  const detached = nativeRoots === undefined ? [] : await nativeRoots.detach(body.path);
+  send(response, 200, JSON.stringify({ detached }), {
+    "content-type": "application/json; charset=utf-8",
+  });
+}
+
 async function readJson<T>(request: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
@@ -690,9 +737,30 @@ async function main(): Promise<void> {
     store,
     // A getter, so each request reports live passthrough state.
     get ignore() {
-      return describeMountIgnore(ignoreConfig, fuse?.getPassthroughStatus?.());
+      return describeMountIgnore(
+        ignoreConfig,
+        fuse?.getPassthroughStatus?.(),
+        nativeRoots?.stats(),
+      );
     },
   };
+
+  // Native roots (MOUNT_NATIVE). Built before the mount so the passthrough
+  // layer can call into it, and switched on only once the kernel has
+  // negotiated FUSE passthrough: `active` is read on every call.
+  const nativeRoots: NativeRoots | undefined =
+    ignoreConfig.native.enabled && backend.kind !== "none" && backend.kind !== "shim"
+      ? createNativeRoots({
+          root: ignoreConfig.root,
+          mountPoint,
+          ignore: ignoreConfig.ignore,
+          native: ignoreConfig.native.matches,
+          active: () => fuse?.getPassthroughStatus?.().negotiated === true,
+        })
+      : undefined;
+  if (nativeRoots !== undefined) {
+    console.log(`[info] MOUNT_NATIVE active: ${ignoreConfig.native.patterns.join(", ")}`);
+  }
 
   // When running on the userspace shim, capture the typed handle
   // so we can wire `flush()` and `reconcileNow()` into the SyncRPC
@@ -718,6 +786,9 @@ async function main(): Promise<void> {
       if (ignoreConfig.enabled) {
         await mkdir(ignoreConfig.root, { recursive: true });
       }
+      // Bind mounts a previous run left under the mount point, if any. A
+      // lazy detach is always safe, so there is nothing to check first.
+      await nativeRoots?.detachAll();
       fuse = await mountFuse({
         backend,
         mountPoint,
@@ -728,10 +799,25 @@ async function main(): Promise<void> {
                 root: ignoreConfig.root,
                 ignore: ignoreConfig.ignore,
                 mountPoint,
+                ...(nativeRoots === undefined
+                  ? {}
+                  : {
+                      onLocalDirectory: (path: string, created: boolean) =>
+                        nativeRoots.ensure(path, created),
+                    }),
               },
             }
           : {}),
       });
+      if (nativeRoots !== undefined) {
+        // The kernel answers this only after FUSE_INIT, which is where
+        // passthrough is negotiated. Through the thread pool, never a
+        // synchronous call: this thread serves the request it waits on.
+        await stat(mountPoint).catch(() => {});
+        // Roots that survived on disk from before a restart or a snapshot
+        // restore. Not awaited: a mount only makes a path faster.
+        nativeRoots.scan();
+      }
     }
   }
   // EXEC_LOG_MAX_BYTES lets the harness force size-cap eviction
@@ -808,12 +894,20 @@ async function main(): Promise<void> {
       return {
         ...collectDbStats(db),
         ...(fuse?.getBufferStats?.() ?? {}),
-        ...(fuse?.getLocalPathStats === undefined ? {} : { localPaths: fuse.getLocalPathStats() }),
+        ...(fuse?.getLocalPathStats === undefined
+          ? {}
+          : {
+              localPaths: {
+                ...fuse.getLocalPathStats(),
+                ...(nativeRoots === undefined ? {} : { nativeRoots: nativeRoots.stats() }),
+              },
+            }),
         store_size_bytes: sizeBytes,
         store_freelist_count: freelistCount,
       };
     },
     checkpointStore,
+    nativeRoots,
   );
 
   let shuttingDown = false;
@@ -832,6 +926,9 @@ async function main(): Promise<void> {
       console.error(error);
     }
 
+    // Before the FUSE unmount, which fails while anything is mounted
+    // beneath it.
+    await nativeRoots?.detachAll();
     if (fuse !== undefined) {
       await unmount(fuse);
     }

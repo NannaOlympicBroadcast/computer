@@ -336,6 +336,109 @@ one transfer but still occupies the container's store. A wrapper that
 injects `ignore` into `fetchChanges` to keep a dependency tree out of the
 Durable Object should be deleted in favor of `MOUNT_IGNORE`.
 
+### Native roots (`MOUNT_NATIVE`)
+
+A local-only path is served from the container's disk, but every
+lookup, `stat`, create, and listing under it still reaches computerd.
+FUSE passthrough sends the file data straight to the kernel; the
+metadata keeps coming through. For a dependency tree that is most of
+the work.
+
+`MOUNT_NATIVE` names local-only directories to bind-mount instead. The
+mount's source is the directory computerd already serves the path from,
+under `MOUNT_IGNORE_PATH`, so everything under it is served by the
+kernel from the container's disk and never reaches computerd at all.
+Content is the same either way. A mount only changes how fast a path is
+served, so a mount that fails, lands late, or is removed is never a
+problem for what a command sees.
+
+```ts
+new ContainerBackend({
+  ignore: ["**/node_modules", "/dist"],
+  containerEnv: { MOUNT_NATIVE: "**/node_modules" },
+});
+```
+
+Each entry must also be in `MOUNT_IGNORE`, written the same way after
+normalization, and must not be an exclusion; anything else fails the
+daemon at startup. A native root is the topmost directory a
+`MOUNT_NATIVE` pattern names: `packages/app/node_modules` is one, the
+`node_modules` directories nested inside it are already under it. A
+symlink or a file is never mounted.
+
+Roots are mounted when they appear, with no watcher:
+
+- When a command creates one. Its parent is synced, so the `mkdir`
+  reaches computerd, which mounts the directory once it has replied.
+  The first few files may be written through FUSE before the mount
+  lands; they end up in the same directory.
+- When something looks one up that exists on disk but is not mounted
+  yet, such as after a container snapshot restore, once the synced
+  parent is back from the host.
+- At startup, for roots already on disk.
+
+Native roots need FUSE passthrough to be negotiated (Linux 6.9 or newer,
+and `COMPUTERD_FUSE_PASSTHROUGH` not turned off), `CAP_SYS_ADMIN`, and
+`mount` from util-linux in the image. Without any of these, the paths
+are served exactly as before.
+
+#### The one difference: removing or renaming a root
+
+`rmdir(2)` and `rename(2)` of a directory that is itself a mount point
+fail with `EBUSY`, and the kernel never asks computerd, so it cannot
+intervene:
+
+| Command | Without a native root | With one |
+| --- | --- | --- |
+| `rm -rf node_modules` | works | empties it, then `EBUSY` on the directory itself |
+| `rm -rf node_modules/*` | works | works |
+| `mv node_modules elsewhere` | `EXDEV`, so `mv` copies | `EBUSY` |
+| `rm -rf packages/app` with a root inside | works | `EBUSY` on the root |
+| `mv packages/app packages/web` | works | works; the mount moves with it |
+
+These are the rules of a Docker volume mounted at `node_modules`, which
+most JavaScript tooling already lives with. To remove a root outright,
+detach it first:
+
+```sh
+curl -X POST http://127.0.0.1:$PORT/__computerd/native-roots/detach \
+  -d '{"path":"packages/app/node_modules"}'   # or no body for every root
+```
+
+The answer lists what was detached. A detached root is not mounted
+again until it is created again, so the `rm -rf` that follows cannot
+race a remount. A detach is always safe: the directory stays where it
+was and computerd serves it through FUSE.
+
+#### Other differences
+
+- `st_dev` under a root is the container disk's, not the FUSE mount's,
+  so `find -xdev` and `du -x` stop at it.
+- inotify works under a root.
+- Hardlinks across a root's boundary still return `EXDEV`, as across
+  any local-only boundary.
+
+#### Checking what was applied
+
+`/__computerd/info` reports `ignore.fastPaths.nativeRoots`:
+
+```json
+{ "enabled": true, "reason": "active", "patterns": ["**/node_modules"],
+  "active": 3, "mounts": 4, "failures": 0, "detaches": 1 }
+```
+
+`active` is read from `/proc/self/mountinfo`, which is the only record
+of what is mounted: anything mounted under `MOUNT_POINT` other than the
+FUSE mount itself is a native root. `reason` explains a disabled state
+(not configured, no kernel FUSE mount, passthrough off or not offered)
+or names the last failure when mounts are being refused.
+`/__computerd/stats` carries the same counters under
+`localPaths.nativeRoots`, along with `lastFailure`.
+
+computerd detaches every native root before it unmounts FUSE on
+`SIGTERM`, and at startup detaches any a previous run left behind
+before mounting again.
+
 ## FUSE prerequisites
 
 Linux hosts and containers need access to `/dev/fuse`, mount permissions, and libfuse 3.17 or newer at runtime. On Debian that is the `fuse3` package from trixie onward. The binary links the system libfuse rather than carrying a copy, and exits with a message naming the package if the library is missing.
@@ -368,6 +471,7 @@ COMPUTER_VAR_NODE_ENV=production  # forwarded into exec as NODE_ENV
 COMPUTERD_DB=/var/lib/computerd/state.db  # on-disk store; "memory" or unset keeps it in memory
 MOUNT_IGNORE=node_modules,dist    # local-only paths, kept on the container's disk and out of sync
 COMPUTERD_FUSE_PASSTHROUGH=0      # serve local-only paths through computerd instead of the kernel
+MOUNT_NATIVE=**/node_modules      # local-only directories to bind-mount; each must also be in MOUNT_IGNORE
 ```
 
 `COMPUTERD_FUSE_PASSTHROUGH` is on by default and only matters when `MOUNT_IGNORE` is set. Turning it off is for ruling passthrough in or out while chasing a problem.

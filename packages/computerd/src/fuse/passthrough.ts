@@ -85,6 +85,13 @@ export interface LocalPassthroughOptions {
   readonly warn?: (message: string) => void;
   /** Omitted means every local-only open is served by this process. */
   readonly passthrough?: PassthroughRegistrar;
+  /**
+   * Called with the mount-relative path of a local-only directory after
+   * the kernel has had its reply. `created` is true from mkdir and from a
+   * rename within the local-only side, false from a lookup that found an
+   * existing directory. Native roots mount from here.
+   */
+  readonly onLocalDirectory?: (relativePath: string, created: boolean) => void;
 }
 
 /** `backingOpen` throws an Error whose `code` is the errno name. */
@@ -286,11 +293,18 @@ export function withLocalPassthrough(
         return;
       }
       localOps += 1;
+      let stat: Stats;
       try {
-        cb(0, statToFuse(fs.lstatSync(localPath(path))));
+        stat = fs.lstatSync(localPath(path));
       } catch (error) {
         cb(toErrno(error), null);
+        return;
       }
+      cb(0, statToFuse(stat));
+      // A directory that already exists on disk but has not been mounted
+      // yet, such as one restored from a snapshot before its synced parent
+      // came back from the host.
+      if (stat.isDirectory()) options.onLocalDirectory?.(toRelative(path, mountRoot), false);
     },
 
     fgetattr(path, fh, cb) {
@@ -528,10 +542,14 @@ export function withLocalPassthrough(
         const target = localPath(path);
         ensureParent(target);
         fs.mkdirSync(target, { mode: mode === 0 ? DEFAULT_DIR_MODE : mode });
-        cb(0);
       } catch (error) {
         cb(toErrno(error));
+        return;
       }
+      cb(0);
+      // After the reply: whatever this triggers resolves paths under the
+      // mount, and the kernel holds the parent locked until we answer.
+      options.onLocalDirectory?.(toRelative(path, mountRoot), true);
     },
 
     rmdir(path, cb) {
@@ -613,10 +631,12 @@ export function withLocalPassthrough(
         const target = localPath(destination);
         ensureParent(target);
         fs.renameSync(localPath(source), target);
-        cb(0);
       } catch (error) {
         cb(toErrno(error));
+        return;
       }
+      cb(0);
+      options.onLocalDirectory?.(toRelative(destination, mountRoot), true);
     },
 
     chmod(path, mode, cb) {

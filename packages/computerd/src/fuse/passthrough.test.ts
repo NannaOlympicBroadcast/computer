@@ -1057,3 +1057,83 @@ describe("withLocalPassthrough: kernel passthrough", () => {
     expect(typeof open(ops, "/node_modules/a.js")).toBe("number");
   });
 });
+
+describe("withLocalPassthrough: directory hooks", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "computerd-passthrough-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const build = () => {
+    const source = recordingOps();
+    const events: string[] = [];
+    const { ops } = withLocalPassthrough(source.ops, {
+      root,
+      ignore: resolveMountIgnore(["**/node_modules"], MOUNT),
+      mountPoint: MOUNT,
+      warn: () => {},
+      onLocalDirectory: (path, created) => events.push(`${created ? "created" : "seen"}:${path}`),
+    });
+    // Each callback records its result, so a test can tell whether a hook
+    // fired before or after the kernel was answered.
+    const reply = (name: string) => (code: number) => events.push(`${name}=${code}`);
+    return { ops, events, reply };
+  };
+
+  test("a local-only mkdir reports the directory after replying", () => {
+    const { ops, events, reply } = build();
+    ops.mkdir("/workspace/app/node_modules", 0o755, reply("mkdir"));
+    expect(events).toEqual(["mkdir=0", "created:app/node_modules"]);
+  });
+
+  test("a lookup of an existing local-only directory reports it as seen", () => {
+    const { ops, events } = build();
+    mkdirSync(join(root, "app/node_modules/react"), { recursive: true });
+    writeFileSync(join(root, "app/node_modules/react/index.js"), "");
+    ops.getattr("/workspace/app/node_modules", (code) => events.push(`getattr=${code}`));
+    ops.getattr("/workspace/app/node_modules/react/index.js", (code) =>
+      events.push(`file=${code}`),
+    );
+    ops.getattr("/workspace/app/node_modules/missing", (code) => events.push(`missing=${code}`));
+    expect(events).toEqual(["getattr=0", "seen:app/node_modules", "file=0", `missing=${-2}`]);
+  });
+
+  test("a failed mkdir reports nothing", () => {
+    const { ops, events, reply } = build();
+    ops.mkdir("/workspace/node_modules", 0o755, reply("mkdir"));
+    ops.mkdir("/workspace/node_modules", 0o755, reply("again"));
+    expect(events).toEqual(["mkdir=0", "created:node_modules", `again=${-17}`]);
+  });
+
+  test("a synced mkdir is the VFS's and reports nothing", () => {
+    const { ops, events, reply } = build();
+    ops.mkdir("/workspace/src", 0o755, reply("mkdir"));
+    expect(events).toEqual(["mkdir=0"]);
+  });
+
+  test("a rename within the local side reports the destination after replying", () => {
+    const { ops, events, reply } = build();
+    ops.mkdir("/workspace/node_modules/.staging", 0o755, () => {});
+    events.length = 0;
+    ops.rename("/workspace/node_modules/.staging", "/workspace/a/node_modules", reply("rename"));
+    expect(events).toEqual(["rename=0", "created:a/node_modules"]);
+  });
+
+  test("a synced rename reports nothing", () => {
+    // A bind mount under the directory moves with it in the kernel, so
+    // there is nothing to re-mount.
+    const { ops, events, reply } = build();
+    ops.rename("/workspace/packages/app", "/workspace/packages/web", reply("rename"));
+    expect(events).toEqual(["rename=0"]);
+  });
+
+  test("a crossing rename reports nothing", () => {
+    const { ops, events, reply } = build();
+    ops.rename("/workspace/tmp", "/workspace/node_modules", reply("rename"));
+    expect(events).toEqual([`rename=${-18}`]);
+  });
+});

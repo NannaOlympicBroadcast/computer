@@ -7,7 +7,12 @@
 
 import { isAbsolute, join, resolve } from "node:path";
 
-import { type MountIgnoreSet, parseMountIgnore, resolveMountIgnore } from "./ignore.js";
+import {
+  MountIgnorePathError,
+  type MountIgnoreSet,
+  parseMountIgnore,
+  resolveMountIgnore,
+} from "./ignore.js";
 
 export interface MountIgnoreConfig {
   /** Where local-only paths are stored. Absolute, outside the mount. */
@@ -16,11 +21,30 @@ export interface MountIgnoreConfig {
   readonly ignore: MountIgnoreSet;
   /** True when at least one path is configured. */
   readonly enabled: boolean;
+  /** Local-only directories to bind-mount from `root` (MOUNT_NATIVE). */
+  readonly native: NativeRootsConfig;
+}
+
+export interface NativeRootsConfig {
+  /** Normalized MOUNT_NATIVE patterns, in the order written. */
+  readonly patterns: readonly string[];
+  /** True when at least one pattern is configured. */
+  readonly enabled: boolean;
+  /** Whether a mount-relative path is one a MOUNT_NATIVE pattern names. */
+  readonly matches: (relativePath: string) => boolean;
 }
 
 export interface MountIgnoreEnv {
   MOUNT_IGNORE?: string;
   MOUNT_IGNORE_PATH?: string;
+  MOUNT_NATIVE?: string;
+}
+
+export class MountNativeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MountNativeError";
+  }
 }
 
 /**
@@ -66,7 +90,50 @@ export function resolveMountIgnoreConfig(
     throw new Error("MOUNT_IGNORE_PATH must not be the filesystem root");
   }
 
-  return { root: normalizedRoot, ignore, enabled: !ignore.isEmpty };
+  const native = resolveNativeRoots(env.MOUNT_NATIVE, ignore, mountPoint);
+  return { root: normalizedRoot, ignore, enabled: !ignore.isEmpty, native };
+}
+
+/**
+ * MOUNT_NATIVE names a subset of MOUNT_IGNORE. Each entry must be written
+ * as one of the MOUNT_IGNORE inclusions (after the same normalization),
+ * so a native root is always a path that is already local-only and the
+ * bind mount changes how it is served, never whether it is synced.
+ */
+export function resolveNativeRoots(
+  raw: string | undefined,
+  ignore: MountIgnoreSet,
+  mountPoint: string,
+): NativeRootsConfig {
+  const entries = parseMountIgnore(raw);
+  const patterns: string[] = [];
+  for (const entry of entries) {
+    if (entry.startsWith("!")) {
+      throw new MountNativeError(
+        `MOUNT_NATIVE pattern ${JSON.stringify(entry)} is an exclusion. MOUNT_NATIVE lists ` +
+          `local-only directories to mount; keep exclusions in MOUNT_IGNORE.`,
+      );
+    }
+    let normalized: string;
+    try {
+      normalized = resolveMountIgnore([entry], mountPoint).patterns[0] as string;
+    } catch (error) {
+      if (error instanceof MountIgnorePathError) {
+        throw new MountNativeError(error.message.replace(/^MOUNT_IGNORE/, "MOUNT_NATIVE"));
+      }
+      throw error;
+    }
+    if (!ignore.patterns.includes(normalized)) {
+      throw new MountNativeError(
+        `MOUNT_NATIVE pattern ${JSON.stringify(entry)} is not in MOUNT_IGNORE. Only ` +
+          `local-only paths can be mounted natively; add ${JSON.stringify(normalized)} ` +
+          `to MOUNT_IGNORE as well.`,
+      );
+    }
+    patterns.push(normalized);
+  }
+  const set = resolveMountIgnore(patterns, "/");
+  return { patterns, enabled: patterns.length > 0, matches: set.matches };
 }
 
 export interface PassthroughStatus {
@@ -93,15 +160,38 @@ export interface MountIgnoreInfo {
     readonly passthroughFallbacks: number;
     /** Possible under libfuse 3, but it would change writes on the synced mount. */
     readonly writebackCache: false;
+    readonly nativeRoots: NativeRootsInfo;
   };
+}
+
+/** Counters from the native-roots module, as `describeMountIgnore` reads them. */
+export interface NativeRootsCounters {
+  readonly active: number;
+  readonly mounts: number;
+  readonly failures: number;
+  readonly detaches: number;
+  readonly lastFailure: string | undefined;
+}
+
+export interface NativeRootsInfo {
+  /** True when native roots are being mounted. */
+  readonly enabled: boolean;
+  readonly reason: string;
+  readonly patterns: readonly string[];
+  readonly active: number;
+  readonly mounts: number;
+  readonly failures: number;
+  readonly detaches: number;
 }
 
 /** `status` is undefined when no kernel FUSE mount is running. */
 export function describeMountIgnore(
   config: MountIgnoreConfig,
   status?: PassthroughStatus,
+  native?: NativeRootsCounters,
 ): MountIgnoreInfo {
   const inactive = inactivePassthroughReason(config, status);
+  const nativeInactive = inactiveNativeRootsReason(config, status);
   return {
     supported: true,
     enabled: config.enabled,
@@ -114,8 +204,47 @@ export function describeMountIgnore(
       passthroughOpens: status?.opens ?? 0,
       passthroughFallbacks: status?.fallbacks ?? 0,
       writebackCache: false,
+      nativeRoots: {
+        enabled: nativeInactive === undefined,
+        reason: nativeInactive ?? nativeActiveReason(native),
+        patterns: config.native.patterns,
+        active: native?.active ?? 0,
+        mounts: native?.mounts ?? 0,
+        failures: native?.failures ?? 0,
+        detaches: native?.detaches ?? 0,
+      },
     },
   };
+}
+
+// Native roots ride on passthrough: both need CAP_SYS_ADMIN and a 6.9
+// kernel, and without passthrough a file opened through FUSE before its
+// root was mounted would have a page cache of its own.
+function inactiveNativeRootsReason(
+  config: MountIgnoreConfig,
+  status: PassthroughStatus | undefined,
+): string | undefined {
+  if (!config.native.enabled) return "no native roots are configured (MOUNT_NATIVE)";
+  if (status === undefined) return "no kernel FUSE mount is running";
+  if (!status.requested) {
+    return "FUSE passthrough is turned off with COMPUTERD_FUSE_PASSTHROUGH, and native roots need it";
+  }
+  if (!status.negotiated) {
+    return "the kernel did not offer FUSE passthrough, and native roots need it (Linux 6.9 or newer)";
+  }
+  return undefined;
+}
+
+function nativeActiveReason(native: NativeRootsCounters | undefined): string {
+  if (native === undefined || native.failures === 0) return "active";
+  if (native.mounts === 0) {
+    return (
+      `active, but every mount so far was refused (${native.failures}; last: ` +
+      `${native.lastFailure ?? "unknown"}); check that computerd has CAP_SYS_ADMIN and ` +
+      `that util-linux mount is installed`
+    );
+  }
+  return `active; ${native.failures} mount(s) failed and those paths are served through FUSE`;
 }
 
 // Each case has a different fix, so each gets its own wording.

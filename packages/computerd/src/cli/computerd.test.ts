@@ -115,6 +115,15 @@ test("computerd exposes file IO through real FUSE when FUSE_MOUNT=fuse", async (
         passthroughOpens: 0,
         passthroughFallbacks: 0,
         writebackCache: false,
+        nativeRoots: {
+          enabled: false,
+          reason: expect.stringContaining("MOUNT_NATIVE"),
+          patterns: [],
+          active: 0,
+          mounts: 0,
+          failures: 0,
+          detaches: 0,
+        },
       },
     },
   });
@@ -1172,6 +1181,46 @@ test("/__computerd/checkpoint refuses a GET", async (_ctx) => {
 
   const response = await request(`http://127.0.0.1:${port}/__computerd/checkpoint`);
   expect(response.statusCode).toBe(405);
+});
+
+test("POST /__computerd/native-roots/detach answers with what it detached", async (_ctx) => {
+  // No kernel mount, so there is nothing to detach. The route still
+  // answers, so a host can call it without knowing the backend.
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "computerd-mount-"));
+  await startComputerd({ port, mountPoint, env: { FUSE_MOUNT: "none" } });
+
+  const response = await request(`http://127.0.0.1:${port}/__computerd/native-roots/detach`, {
+    method: "POST",
+  });
+  expect(response.statusCode).toBe(200);
+  expect(JSON.parse(response.body)).toEqual({ detached: [] });
+
+  const refused = await request(`http://127.0.0.1:${port}/__computerd/native-roots/detach`);
+  expect(refused.statusCode).toBe(405);
+});
+
+test("computerd refuses a MOUNT_NATIVE pattern that is not in MOUNT_IGNORE", async () => {
+  // A native root is a local-only path served faster. One that is not
+  // local-only would be a synced path bypassing the VFS.
+  const port = await getAvailablePort();
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "computerd-mount-"));
+  const child = spawn(cliPath, {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      MOUNT_POINT: mountPoint,
+      PORT: String(port),
+      FUSE_MOUNT: "none",
+      MOUNT_IGNORE: "/dist",
+      MOUNT_NATIVE: "**/node_modules",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const { code, stderr } = await waitForExit(child);
+  expect(code).toBe(1);
+  expect(stderr).toMatch(/MOUNT_NATIVE pattern "\*\*\/node_modules" is not in MOUNT_IGNORE/);
 });
 
 test("/__computerd/checkpoint requires the shared secret when one is set", async (_ctx) => {

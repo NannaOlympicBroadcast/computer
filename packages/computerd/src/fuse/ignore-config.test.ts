@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   defaultIgnoreRoot,
   describeMountIgnore,
+  MountNativeError,
   resolveMountIgnoreConfig,
 } from "./ignore-config.js";
 
@@ -176,5 +177,91 @@ describe("describeMountIgnore", () => {
     const info = describeMountIgnore(enabled, live);
     expect(info.fastPaths.passthrough).toBe(false);
     expect(info.fastPaths.passthroughReason).toMatch(/no local-only file has been opened/);
+  });
+});
+
+describe("resolveMountIgnoreConfig: MOUNT_NATIVE", () => {
+  const resolve = (env: Record<string, string>) =>
+    resolveMountIgnoreConfig(
+      { MOUNT_IGNORE: "**/node_modules,/dist,!/vendor/node_modules", ...env },
+      "/workspace",
+    );
+
+  test("is off when unset or empty", () => {
+    expect(resolve({}).native).toMatchObject({ enabled: false, patterns: [] });
+    expect(resolve({ MOUNT_NATIVE: " , " }).native).toMatchObject({ enabled: false, patterns: [] });
+  });
+
+  test("accepts a subset of MOUNT_IGNORE, normalized the same way", () => {
+    const native = resolve({ MOUNT_NATIVE: "**/node_modules, /workspace/dist/" }).native;
+    expect(native.enabled).toBe(true);
+    expect(native.patterns).toEqual(["**/node_modules", "/dist"]);
+    expect(native.matches("app/node_modules")).toBe(true);
+    expect(native.matches("dist")).toBe(true);
+    expect(native.matches("app/node_modules/react")).toBe(false);
+  });
+
+  test("rejects a pattern that is not in MOUNT_IGNORE", () => {
+    expect(() => resolve({ MOUNT_NATIVE: "**/.venv" })).toThrow(/not in MOUNT_IGNORE/);
+    expect(() => resolve({ MOUNT_NATIVE: "/node_modules" })).toThrow(/not in MOUNT_IGNORE/);
+  });
+
+  test("rejects MOUNT_NATIVE without MOUNT_IGNORE", () => {
+    expect(() =>
+      resolveMountIgnoreConfig({ MOUNT_NATIVE: "**/node_modules" }, "/workspace"),
+    ).toThrow(/not in MOUNT_IGNORE/);
+  });
+
+  test("rejects an exclusion", () => {
+    expect(() => resolve({ MOUNT_NATIVE: "!/vendor/node_modules" })).toThrow(MountNativeError);
+  });
+
+  test("reports a malformed pattern under its own name", () => {
+    expect(() => resolve({ MOUNT_NATIVE: "node_modules" })).toThrow(/^MOUNT_NATIVE pattern/);
+  });
+});
+
+describe("describeMountIgnore: nativeRoots", () => {
+  const configured = resolveMountIgnoreConfig(
+    { MOUNT_IGNORE: "**/node_modules", MOUNT_NATIVE: "**/node_modules" },
+    "/workspace",
+  );
+  const live = { requested: true, negotiated: true, opens: 0, fallbacks: 0 };
+  const counters = { active: 2, mounts: 3, failures: 0, detaches: 1, lastFailure: undefined };
+
+  test("reports the patterns and counters when active", () => {
+    expect(describeMountIgnore(configured, live, counters).fastPaths.nativeRoots).toEqual({
+      enabled: true,
+      reason: "active",
+      patterns: ["**/node_modules"],
+      active: 2,
+      mounts: 3,
+      failures: 0,
+      detaches: 1,
+    });
+  });
+
+  test("is off when MOUNT_NATIVE is unset", () => {
+    const config = resolveMountIgnoreConfig({ MOUNT_IGNORE: "**/node_modules" }, "/workspace");
+    const info = describeMountIgnore(config, live).fastPaths.nativeRoots;
+    expect(info.enabled).toBe(false);
+    expect(info.reason).toMatch(/MOUNT_NATIVE/);
+  });
+
+  test("needs a kernel mount and negotiated passthrough", () => {
+    expect(describeMountIgnore(configured).fastPaths.nativeRoots.reason).toMatch(/no kernel FUSE/);
+    const off = describeMountIgnore(configured, { ...live, requested: false, negotiated: false });
+    expect(off.fastPaths.nativeRoots.reason).toMatch(/COMPUTERD_FUSE_PASSTHROUGH/);
+    const old = describeMountIgnore(configured, { ...live, negotiated: false });
+    expect(old.fastPaths.nativeRoots).toMatchObject({ enabled: false });
+    expect(old.fastPaths.nativeRoots.reason).toMatch(/6\.9/);
+  });
+
+  test("names the failure when every mount was refused", () => {
+    const refused = { ...counters, active: 0, mounts: 0, failures: 4, lastFailure: "a: exited 32" };
+    const info = describeMountIgnore(configured, live, refused).fastPaths.nativeRoots;
+    expect(info.enabled).toBe(true);
+    expect(info.reason).toMatch(/every mount so far was refused/);
+    expect(info.reason).toMatch(/exited 32/);
   });
 });
