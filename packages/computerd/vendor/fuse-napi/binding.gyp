@@ -17,7 +17,8 @@
         "libraries": ["<@(fuse__libraries)"]},
     "libraries": [],
     "sources": [
-      "fuse-native.c"
+      "fuse-native.c",
+      "removal-guard.c"
     ],
     'defines': [
       '_FILE_OFFSET_BITS=64'

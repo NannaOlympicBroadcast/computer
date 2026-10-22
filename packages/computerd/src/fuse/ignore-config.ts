@@ -108,7 +108,13 @@ export interface NativeRootsStatus {
   readonly mounts: number;
   readonly failures: number;
   readonly detaches: number;
+  readonly removalDetaches: number;
   readonly lastFailure: string | undefined;
+  /**
+   * The removal guard, which lets commands computerd starts remove or
+   * rename a native root. Undefined when it was never started.
+   */
+  readonly removal?: { readonly active: boolean; readonly reason: string };
 }
 
 export interface NativeRootsInfo {
@@ -119,6 +125,10 @@ export interface NativeRootsInfo {
   readonly mounts: number;
   readonly failures: number;
   readonly detaches: number;
+  /** Removing or renaming a root works from commands computerd starts. */
+  readonly transparentRemoval: boolean;
+  readonly transparentRemovalReason: string;
+  readonly removalDetaches: number;
 }
 
 /** `status` is undefined when no kernel FUSE mount is running. */
@@ -148,6 +158,12 @@ export function describeMountIgnore(
         mounts: native?.mounts ?? 0,
         failures: native?.failures ?? 0,
         detaches: native?.detaches ?? 0,
+        transparentRemoval: nativeInactive === undefined && native?.removal?.active === true,
+        transparentRemovalReason:
+          nativeInactive === undefined
+            ? (native?.removal?.reason ?? "the removal guard was not started")
+            : "native roots are off",
+        removalDetaches: native?.removalDetaches ?? 0,
       },
     },
   };

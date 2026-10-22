@@ -1686,6 +1686,25 @@ for (const [name, value] of Object.entries(os.constants.errno)) {
   Fuse[name] = -value
 }
 
+// Not upstream; see PATCHES.md. Pauses rmdir/rename of registered paths
+// for this process's threads and children long enough to lazily detach the
+// mount on them. Each call returns 0 or a negative errno.
+Fuse.removalGuard = Object.freeze({
+  start (onDetached) {
+    if (typeof onDetached !== 'function') throw new TypeError('removalGuard.start requires a callback')
+    return binding.fuse_native_guard_start(onDetached)
+  },
+  addRoot (path, fd) {
+    return binding.fuse_native_guard_add_root(path, fd)
+  },
+  removeRoot (path) {
+    return binding.fuse_native_guard_remove_root(path) === 1
+  },
+  stats () {
+    return binding.fuse_native_guard_stats()
+  }
+})
+
 module.exports = Fuse
 
 function mountTimeout (timeout) {

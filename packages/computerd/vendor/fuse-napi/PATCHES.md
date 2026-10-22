@@ -59,6 +59,37 @@ All changes are in `fuse-native.c`, `index.js`, and `index.d.ts`.
   operation flag (`FUSE_OPERATION_FLAG_USE_INO`, 32) and the init hook
   sets `config->use_ino`.
 
+### `removal-guard.c` (new), `removal-guard.h` (new), `binding.gyp`
+
+A removal guard for computerd's native roots: local-only directories it
+bind-mounts onto the FUSE mount. `rmdir(2)` and `rename(2)` of a mount
+point fail with `EBUSY` in the VFS before FUSE is consulted.
+
+- `fuse_native_guard_start(onDetached)` starts a thread, then installs a
+  seccomp filter with `SECCOMP_FILTER_FLAG_NEW_LISTENER` on the calling
+  thread, without `PR_SET_NO_NEW_PRIVS`, so it needs `CAP_SYS_ADMIN`. The
+  filter returns `SECCOMP_RET_USER_NOTIF` for `rmdir`, `rename`,
+  `renameat`, `renameat2`, and `unlinkat` with `AT_REMOVEDIR` (tested in
+  BPF), and allows everything else, including other architectures and
+  x32. Children forked from that thread inherit it. Returns 0 or `-errno`.
+- The thread reads each trapped call's path with `process_vm_readv`,
+  resolves it lexically against `/proc/<tid>/cwd` or `/proc/<tid>/fd/N`,
+  and if it is a registered root, detaches it with
+  `umount2("/proc/self/fd/<root fd>", MNT_DETACH)`, then answers
+  `SECCOMP_USER_NOTIF_FLAG_CONTINUE`. It answers `CONTINUE` on every path.
+  It never resolves a path under the FUSE mount, because the thread whose
+  call is trapped may be the one serving FUSE. The thread exists before
+  the filter, so it is not filtered itself. After a detach it calls
+  `onDetached(path)` through a threadsafe function, unreferenced so it
+  does not hold the event loop open.
+- `fuse_native_guard_add_root(path, fd)` registers a root and takes
+  ownership of `fd`, an open directory at the root of the mount.
+  `fuse_native_guard_remove_root(path)` forgets one and closes its
+  descriptor. `fuse_native_guard_stats()` returns traps, detaches, roots.
+- Linux on x86_64 and aarch64 only; elsewhere every entry point returns
+  `-ENOSYS`. Exported from `fuse-native.c`'s init and wrapped in
+  `index.js` as `Fuse.removalGuard`, typed in `index.d.ts`.
+
 ## Verified on this host
 
 Kernel 6.18, libfuse 3.17.2, btrfs backing store. A mount that requests

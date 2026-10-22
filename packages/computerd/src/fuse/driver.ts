@@ -157,6 +157,16 @@ export interface FuseMount {
   getLocalPathStats?: () => PassthroughStats;
   // Only present on a kernel FUSE mount.
   getPassthroughStatus?: () => PassthroughStatus;
+  // The in-process removal guard from the vendored binding, for native
+  // roots. Only present on a kernel FUSE mount.
+  removalGuard?: RemovalGuardBinding;
+}
+
+/** Fuse.removalGuard in vendor/fuse-napi; each call returns 0 or -errno. */
+export interface RemovalGuardBinding {
+  start(onDetached: (path: string) => void): number;
+  addRoot(path: string, fd: number): number;
+  removeRoot(path: string): boolean;
 }
 
 interface FuseInstance {
@@ -1169,6 +1179,7 @@ export async function mountFuse(options: {
     },
     getBufferStats: routedOps.getBufferStats,
     ...(localPaths === undefined ? {} : { getLocalPathStats: localPaths.stats }),
+    ...(Fuse.removalGuard === undefined ? {} : { removalGuard: Fuse.removalGuard }),
     getPassthroughStatus: () => {
       const stats = localPaths?.stats();
       return {

@@ -19,6 +19,13 @@ from util-linux; without them local-only paths are served as before.
 `COMPUTERD_FUSE_NATIVE_ROOTS=0` turns them off. `/__computerd/info` reports
 the state under `ignore.fastPaths.nativeRoots`.
 
-Removing or renaming a mounted directory itself fails with `EBUSY`, as for a
-Docker volume. `POST /__computerd/native-roots/detach` detaches one, or all,
-first.
+Removing or renaming a mounted directory itself would fail with `EBUSY`, as
+for a Docker volume. For the commands computerd runs, a removal guard prevents
+that: computerd installs a seccomp filter on the thread it spawns commands
+from, and when a command removes or renames a native root, it detaches the
+mount first and lets the call continue. `rm -rf node_modules`, `fs.rm`, and
+`mv` behave as they do without a mount. It needs `CAP_SYS_ADMIN` and costs
+about 15 µs per directory removal or rename; file operations are not
+affected. Processes computerd did not start still get `EBUSY`, and can call
+`POST /__computerd/native-roots/detach` first. `/__computerd/info` reports
+the guard as `nativeRoots.transparentRemoval`.

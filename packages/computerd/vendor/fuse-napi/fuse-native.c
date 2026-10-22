@@ -13,6 +13,7 @@
 #include <uv.h>
 #include <node_api.h>
 #include <napi-macros.h>
+#include "removal-guard.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -4120,6 +4121,10 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(fuse_native_signal_removexattr)
   NAPI_EXPORT_FUNCTION(fuse_native_backing_open)
   NAPI_EXPORT_FUNCTION(fuse_native_backing_close)
+  NAPI_EXPORT_FUNCTION(fuse_native_guard_start)
+  NAPI_EXPORT_FUNCTION(fuse_native_guard_add_root)
+  NAPI_EXPORT_FUNCTION(fuse_native_guard_remove_root)
+  NAPI_EXPORT_FUNCTION(fuse_native_guard_stats)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_open)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_opendir)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_read)

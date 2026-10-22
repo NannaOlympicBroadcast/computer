@@ -1,6 +1,6 @@
 export type { FUSEBackend, FuseMountMode, ResolveFuseBackendOptions } from "./backend.js";
 export { parseFuseMountMode, resolveFuseBackend } from "./backend.js";
-export type { FuseMount, FuseOps, FuseStat } from "./driver.js";
+export type { FuseMount, FuseOps, FuseStat, RemovalGuardBinding } from "./driver.js";
 export { makeFUSEOps, mountFuse } from "./driver.js";
 export { nativeRootsRequested, passthroughRequested } from "./options.js";
 export type { MountIgnoreSet } from "./ignore.js";
@@ -18,7 +18,12 @@ export {
   describeMountIgnore,
   resolveMountIgnoreConfig,
 } from "./ignore-config.js";
-export type { NativeRoots, NativeRootsOptions, NativeRootsStats } from "./native-roots.js";
+export type {
+  NativeRoots,
+  NativeRootsOptions,
+  NativeRootsStats,
+  RemovalGuard,
+} from "./native-roots.js";
 export { createNativeRoots } from "./native-roots.js";
 export type { LocalPassthrough, LocalPassthroughOptions, PassthroughStats } from "./passthrough.js";
 export { withLocalPassthrough } from "./passthrough.js";

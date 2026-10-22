@@ -86,6 +86,7 @@ function harness(
       return [...names];
     },
     warn: (message) => warnings.push(message),
+    openDirectory: async () => 100 + commands.length,
   };
 
   const roots = createNativeRoots({
@@ -352,6 +353,100 @@ describe("parking", () => {
     await roots.settled();
     expect(roots.stats().failures).toBe(0);
     expect(h.warnings).toEqual([]);
+  });
+});
+
+describe("removal guard", () => {
+  function fakeGuard() {
+    const roots = new Map<string, number>();
+    const removed: string[] = [];
+    return {
+      roots,
+      removed,
+      guard: {
+        addRoot: (path: string, fd: number) => {
+          roots.set(path, fd);
+          return 0;
+        },
+        removeRoot: (path: string) => {
+          removed.push(path);
+          return roots.delete(path);
+        },
+      },
+    };
+  }
+
+  test("attaching hands over roots already mounted, and later mounts follow", async () => {
+    const { roots } = harness({ dirs: ["a/node_modules", "b/node_modules"] });
+    roots.ensure("a/node_modules");
+    await roots.settled();
+    const g = fakeGuard();
+    await roots.attachGuard(g.guard);
+    expect([...g.roots.keys()]).toEqual([`${MOUNT}/a/node_modules`]);
+    roots.ensure("b/node_modules");
+    await roots.settled();
+    expect([...g.roots.keys()].sort()).toEqual([
+      `${MOUNT}/a/node_modules`,
+      `${MOUNT}/b/node_modules`,
+    ]);
+  });
+
+  test("a requested detach takes the root back from the guard", async () => {
+    const { roots } = harness({ dirs: ["node_modules"] });
+    const g = fakeGuard();
+    await roots.attachGuard(g.guard);
+    roots.ensure("node_modules");
+    await roots.settled();
+    await roots.detach("node_modules");
+    expect(g.removed).toEqual([`${MOUNT}/node_modules`]);
+    expect(g.roots.size).toBe(0);
+  });
+
+  test("a guard detach parks the root and is counted", async () => {
+    const h = harness({ dirs: ["node_modules"] });
+    h.roots.ensure("node_modules");
+    await h.roots.settled();
+    // The guard unmounted it itself, from its own thread.
+    h.mounted.clear();
+    h.roots.guardDetached(`${MOUNT}/node_modules`);
+    expect(h.roots.stats()).toMatchObject({ detaches: 1, removalDetaches: 1, active: 0 });
+    h.roots.ensure("node_modules");
+    await h.roots.settled();
+    expect(h.mounted.size).toBe(0);
+    h.roots.ensure("node_modules", true);
+    await h.roots.settled();
+    expect(h.mounted.size).toBe(1);
+  });
+
+  test("a root parked while its mount was on the way is not mounted", async () => {
+    // The guard detached it for an rmdir while this mount waited on the
+    // thread pool; mounting now would put it back under the rmdir.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const commands: string[][] = [];
+    const roots = createNativeRoots({
+      root: ROOT,
+      mountPoint: MOUNT,
+      ignore: resolveMountIgnore(["**/node_modules"], MOUNT),
+      run: async (argv) => {
+        commands.push([...argv]);
+        return 0;
+      },
+      mountinfo: () => "",
+      lstat: () => ({ isDirectory: () => true, dev: 1, ino: 1 }),
+      lstatTarget: async () => {
+        await gate;
+        return { isDirectory: () => true };
+      },
+      stat: async () => ({ dev: 1, ino: 1 }),
+    });
+    roots.ensure("node_modules");
+    roots.guardDetached(`${MOUNT}/node_modules`);
+    release();
+    await roots.settled();
+    expect(commands).toEqual([]);
   });
 });
 

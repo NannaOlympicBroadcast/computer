@@ -375,19 +375,35 @@ while chasing a problem.
 #### Removing or renaming a root
 
 `rmdir(2)` and `rename(2)` of a directory that is itself a mount point
-fail with `EBUSY`, and the kernel never asks computerd, so it cannot
-intervene:
+fail with `EBUSY`, and the kernel does not ask FUSE first. For the
+commands computerd runs, a removal guard takes care of it: computerd
+installs a seccomp filter on the thread it spawns commands from, so each
+command and everything it starts pauses on `rmdir`, `unlinkat` with
+`AT_REMOVEDIR`, and the `rename` family. A thread in computerd checks
+the path; if it names a native root, it detaches the mount, then lets
+the call continue, and computerd serves it as it would any local-only
+path. Everything else, file deletions included, is never stopped.
 
-| Command | Through FUSE | On a native root |
-| --- | --- | --- |
-| `rm -rf node_modules` | works | empties it, then `EBUSY` on the directory itself |
-| `rm -rf node_modules/*` | works | works |
-| `mv node_modules elsewhere` | `EXDEV`, so `mv` copies | `EBUSY` |
-| `rm -rf packages/app` with a root inside | works | `EBUSY` on the root |
-| `mv packages/app packages/web` | works | works; the mount moves with it |
+| Command | Through FUSE | Native root, from a computerd command | Native root, from elsewhere |
+| --- | --- | --- | --- |
+| `rm -rf node_modules` | works | works | empties it, then `EBUSY` |
+| `rm -rf packages/app` with a root inside | works | works | `EBUSY` on the root |
+| `rmdir`/`fs.rm`/`shutil.rmtree` of a root | works | works | `EBUSY` |
+| `mv node_modules elsewhere` | `EXDEV`, so `mv` copies | `EXDEV`, so `mv` copies | `EBUSY` |
+| `mv packages/app packages/web` | works | works; the mount moves with it | works |
 
-These are the rules of a Docker volume mounted at `node_modules`. To
-remove a root outright, detach it first:
+"Elsewhere" is any process computerd did not start, such as a `docker
+exec` shell. A removed root is mounted again when it is created again.
+Each directory removal or rename a command makes costs a round trip to
+the guard, about 15 µs: `rm -rf` of 5,000 directories took 124 ms
+rather than 50 ms on a laptop VM. File deletions, reads, and writes are
+not affected.
+
+The guard is a convenience, not a security boundary. It needs
+`CAP_SYS_ADMIN` and Linux 5.5 or newer, and starts only with native
+roots. Without it, removing a root from any process gets `EBUSY`, as
+from elsewhere above. To remove one from a process the guard does not
+cover, detach it first:
 
 ```sh
 curl -X POST http://127.0.0.1:$PORT/__computerd/native-roots/detach \
@@ -413,7 +429,8 @@ was and computerd serves it through FUSE.
 
 ```json
 { "enabled": true, "reason": "active", "active": 3, "mounts": 4,
-  "failures": 0, "detaches": 1 }
+  "failures": 0, "detaches": 1, "transparentRemoval": true,
+  "transparentRemovalReason": "active", "removalDetaches": 1 }
 ```
 
 `active` is read from `/proc/self/mountinfo`, which is the only record
@@ -421,6 +438,9 @@ of what is mounted: anything mounted under `MOUNT_POINT` other than the
 FUSE mount itself is a native root. `reason` explains a disabled state
 (no `MOUNT_IGNORE`, no kernel FUSE mount, turned off, passthrough off or
 not offered) or names the last failure when mounts are being refused.
+`transparentRemoval` says whether the removal guard is on, and
+`transparentRemovalReason` why not when it is off; `removalDetaches`
+counts the roots it detached for a removal or rename.
 `/__computerd/stats` carries the same counters under
 `localPaths.nativeRoots`, along with `lastFailure`.
 

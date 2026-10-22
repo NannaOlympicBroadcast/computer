@@ -16,6 +16,10 @@
 //   to write, recover, or get out of step.
 // - A lazy detach is always safe: the detached tree is the same backing
 //   directory the FUSE layer serves, and it is never synced.
+// - Removing or renaming a root itself fails with EBUSY in the kernel. For
+//   commands computerd runs, the removal guard (vendor/fuse-napi,
+//   removal-guard.c) detaches the mount first; this module hands it each
+//   root's descriptor and parks whatever it detaches.
 // - Renaming a synced directory needs nothing: the kernel moves a mount
 //   along with the dentry it sits on. (Re-mounting from the rename reply
 //   would race the kernel's own move and stack a second mount.)
@@ -28,7 +32,15 @@
 // stat of a mounted target goes through the libuv thread pool.
 
 import { spawn } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync, promises as fsPromises } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  lstatSync,
+  open as openCallback,
+  readdirSync,
+  readFileSync,
+  promises as fsPromises,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { MountIgnoreSet } from "./ignore.js";
@@ -54,6 +66,17 @@ export interface NativeRootsOptions {
   readonly lstatTarget?: (path: string) => Promise<{ isDirectory(): boolean }>;
   readonly readdir?: (path: string) => string[];
   readonly warn?: (message: string) => void;
+  /** Opens a directory under the mount, off the main thread. Injected for tests. */
+  readonly openDirectory?: (path: string) => Promise<number>;
+}
+
+/**
+ * The in-process removal guard (vendor/fuse-napi/removal-guard.c), as this
+ * module drives it. It owns the descriptors it is given.
+ */
+export interface RemovalGuard {
+  addRoot(path: string, fd: number): number;
+  removeRoot(path: string): boolean;
 }
 
 export interface NativeRootsStats {
@@ -63,8 +86,10 @@ export interface NativeRootsStats {
   readonly mounts: number;
   /** Mounts that were refused or failed verification. */
   readonly failures: number;
-  /** Lazy detaches issued since start. */
+  /** Lazy detaches issued since start, by request or by the removal guard. */
   readonly detaches: number;
+  /** Detaches the removal guard made so a removal or rename could go through. */
+  readonly removalDetaches: number;
   /** The most recent failure, for the info endpoint. */
   readonly lastFailure: string | undefined;
 }
@@ -91,6 +116,16 @@ export interface NativeRoots {
   detachAll(): Promise<string[]>;
   /** Whether `rel` is a native root: a local-only directory whose parent is synced. */
   isRoot(relativePath: string): boolean;
+  /**
+   * Hands every mounted root, now and from here on, to the removal guard.
+   * Call once the guard has started.
+   */
+  attachGuard(guard: RemovalGuard): Promise<void>;
+  /**
+   * The removal guard detached `target` so a removal or rename could go
+   * through. Parks it, as a requested detach does.
+   */
+  guardDetached(target: string): void;
   stats(): NativeRootsStats;
 }
 
@@ -114,6 +149,35 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
   let failures = 0;
   let detaches = 0;
   let lastFailure: string | undefined;
+  let removalDetaches = 0;
+  let guard: RemovalGuard | undefined;
+  const openDirectory =
+    options.openDirectory ??
+    ((path: string) =>
+      new Promise<number>((resolve, reject) => {
+        // The callback form, for a raw descriptor the guard can own; a
+        // FileHandle would close itself when collected.
+        openCallback(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY, (error, fd) => {
+          if (error) reject(error);
+          else resolve(fd);
+        });
+      }));
+
+  // Through the thread pool: the target is under the mount.
+  const registerWithGuard = async (target: string): Promise<void> => {
+    if (guard === undefined) return;
+    let fd: number;
+    try {
+      fd = await openDirectory(target);
+    } catch {
+      return; // Gone again; nothing to guard.
+    }
+    if (guard === undefined) {
+      closeSync(fd);
+      return;
+    }
+    guard.addRoot(target, fd);
+  };
 
   const targetOf = (rel: string): string => join(mountPoint, rel);
   const relOf = (target: string): string => stripSlashes(target.slice(mountPoint.length));
@@ -190,6 +254,9 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
     } catch {
       return;
     }
+    // Parked while we waited: the removal guard or a caller detached it so
+    // it could be removed. Mounting now would put it back under them.
+    if (parked.has(rel)) return;
 
     const bound = await run(["mount", "--bind", source, target]);
     if (bound !== 0) {
@@ -216,6 +283,7 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
       return;
     }
     mounts += 1;
+    await registerWithGuard(target);
   }
 
   const ensure = (relativePath: string, created = false): void => {
@@ -257,6 +325,9 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
     const detached: string[] = [];
     // Deepest first, so a parent is never detached out from under a child.
     for (const target of [...targets].sort((a, b) => b.length - a.length)) {
+      // Closes the guard's descriptor, which would otherwise keep the
+      // detached mount alive.
+      guard?.removeRoot(target);
       if ((await run(["umount", "-l", target])) === 0) {
         detaches += 1;
         detached.push(target);
@@ -285,7 +356,23 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
     },
     detachAll: () => detachTargets(owned()),
     isRoot,
-    stats: () => ({ active: owned().length, mounts, failures, detaches, lastFailure }),
+    attachGuard: async (attached) => {
+      guard = attached;
+      await Promise.all(owned().map((target) => registerWithGuard(target)));
+    },
+    guardDetached: (target) => {
+      parked.add(relOf(target));
+      detaches += 1;
+      removalDetaches += 1;
+    },
+    stats: () => ({
+      active: owned().length,
+      mounts,
+      failures,
+      detaches,
+      removalDetaches,
+      lastFailure,
+    }),
   };
 }
 

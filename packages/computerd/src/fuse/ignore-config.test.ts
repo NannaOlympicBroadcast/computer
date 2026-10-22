@@ -188,7 +188,9 @@ describe("describeMountIgnore: nativeRoots", () => {
     mounts: 3,
     failures: 0,
     detaches: 1,
+    removalDetaches: 1,
     lastFailure: undefined,
+    removal: { active: true, reason: "active" },
   };
 
   test("is on with MOUNT_IGNORE alone, reporting the counters", () => {
@@ -199,6 +201,23 @@ describe("describeMountIgnore: nativeRoots", () => {
       mounts: 3,
       failures: 0,
       detaches: 1,
+      transparentRemoval: true,
+      transparentRemovalReason: "active",
+      removalDetaches: 1,
+    });
+  });
+
+  test("reports why removal is not transparent", () => {
+    const refused = { ...native, removal: { active: false, reason: "seccomp refused (EACCES)" } };
+    const info = describeMountIgnore(configured, live, refused).fastPaths.nativeRoots;
+    expect(info).toMatchObject({ enabled: true, transparentRemoval: false });
+    expect(info.transparentRemovalReason).toMatch(/EACCES/);
+    const never = describeMountIgnore(configured, live, { ...native, removal: undefined });
+    expect(never.fastPaths.nativeRoots.transparentRemovalReason).toMatch(/not started/);
+    const off = describeMountIgnore(configured, live, { ...native, requested: false });
+    expect(off.fastPaths.nativeRoots).toMatchObject({
+      transparentRemoval: false,
+      transparentRemovalReason: "native roots are off",
     });
   });
 

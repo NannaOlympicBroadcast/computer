@@ -207,7 +207,14 @@ function assertLibfuseVersion(version) {
 
 async function addonCacheKey(target) {
   const hash = createHash("sha256").update(`${addonBuildImage}\n${target.dockerPlatform}\n`);
-  for (const file of ["fuse-native.c", "binding.gyp", "scripts/fuse-config.js", "package.json"]) {
+  for (const file of [
+    "fuse-native.c",
+    "removal-guard.c",
+    "removal-guard.h",
+    "binding.gyp",
+    "scripts/fuse-config.js",
+    "package.json",
+  ]) {
     hash.update(await readFile(resolve(addonSourceDir, file)));
   }
   return hash.digest("hex");

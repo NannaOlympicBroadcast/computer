@@ -714,6 +714,13 @@ declare class Fuse {
 
   /** FUSE capability bit for passthrough, for use with `want`. */
   public static CAP_PASSTHROUGH: number;
+  /** Not upstream; see PATCHES.md. */
+  public static removalGuard: {
+    start(onDetached: (path: string) => void): number;
+    addRoot(path: string, fd: number): number;
+    removeRoot(path: string): boolean;
+    stats(): { traps?: number; detaches?: number; roots?: number };
+  };
   public static CAP_ASYNC_READ: number;
   public context: () => Readonly<Fuse.RequestContext> | null;
   public errno: (code?: string) => number;

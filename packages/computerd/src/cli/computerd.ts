@@ -4,6 +4,7 @@ import { timingSafeEqual } from "node:crypto";
 import { mkdir, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
+import { constants as osConstants } from "node:os";
 import { isAbsolute } from "node:path";
 import type { ExecEvent as RpcExecEvent } from "@cloudflare/computer-rpc";
 import { isStubTrackingEnabled, stubSnapshot } from "@cloudflare/computer-rpc/debug";
@@ -23,6 +24,7 @@ import {
   mountFuse,
   type NativeRoots,
   nativeRootsRequested,
+  type RemovalGuardBinding,
   parseFuseMountMode,
   parseStoreMode,
   type ResolvedStore,
@@ -157,8 +159,41 @@ const NO_NATIVE_ROOT_STATS = {
   mounts: 0,
   failures: 0,
   detaches: 0,
+  removalDetaches: 0,
   lastFailure: undefined,
 } as const;
+
+// Starts the removal guard on this thread, the one every command is
+// spawned from, so each command and everything it starts inherits it.
+function startRemovalGuard(
+  guard: RemovalGuardBinding | undefined,
+  roots: NativeRoots,
+): { active: boolean; reason: string } {
+  if (guard === undefined)
+    return { active: false, reason: "the FUSE binding has no removal guard" };
+  const result = guard.start((target) => roots.guardDetached(target));
+  if (result === 0) {
+    void roots.attachGuard(guard);
+    return { active: true, reason: "active" };
+  }
+  const code = errnoName(-result);
+  const reason =
+    code === "EACCES" || code === "EPERM"
+      ? `the kernel refused the seccomp filter (${code}); computerd needs CAP_SYS_ADMIN`
+      : code === "ENOSYS"
+        ? "not supported on this platform"
+        : `could not start (${code})`;
+  console.warn(
+    `computerd: removal guard off: ${reason}. Removing or renaming a native root ` +
+      `will fail with EBUSY; POST /__computerd/native-roots/detach first.`,
+  );
+  return { active: false, reason };
+}
+
+function errnoName(errno: number): string {
+  const entry = Object.entries(osConstants.errno).find(([, value]) => value === errno);
+  return entry?.[0] ?? `errno ${errno}`;
+}
 
 interface ComputerdInfo {
   backend: FUSEBackend;
@@ -755,6 +790,7 @@ async function main(): Promise<void> {
           : {
               requested: nativeRootsWanted,
               ...(nativeRoots?.stats() ?? NO_NATIVE_ROOT_STATS),
+              ...(removal === undefined ? {} : { removal }),
             },
       );
     },
@@ -765,6 +801,7 @@ async function main(): Promise<void> {
   // into it, and switched on only once the kernel has negotiated FUSE
   // passthrough: `active` is read on every call.
   const nativeRootsWanted = nativeRootsRequested(process.env);
+  let removal: { active: boolean; reason: string } | undefined;
   const nativeRoots: NativeRoots | undefined =
     ignoreConfig.enabled && nativeRootsWanted && backend.kind !== "none" && backend.kind !== "shim"
       ? createNativeRoots({
@@ -827,6 +864,11 @@ async function main(): Promise<void> {
         // passthrough is negotiated. Through the thread pool, never a
         // synchronous call: this thread serves the request it waits on.
         await stat(mountPoint).catch(() => {});
+        if (fuse.getPassthroughStatus?.().negotiated === true) {
+          // Before the HTTP server accepts commands, so every command is
+          // forked after the filter is in place.
+          removal = startRemovalGuard(fuse.removalGuard, nativeRoots);
+        }
         // Roots that survived on disk from before a restart or a snapshot
         // restore. Not awaited: a mount only makes a path faster.
         nativeRoots.scan();

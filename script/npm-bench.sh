@@ -117,9 +117,9 @@ stop_heartbeat() {
 }
 
 # A native root is a mount point, and rmdir of a mount point fails with
-# EBUSY, so `rm -rf` of a previous run's directory stops at its
-# node_modules. Detach them first; COMPUTERD_URL is set when MOUNT_IGNORE
-# is. A detach is always safe.
+# EBUSY. computerd's removal guard handles that for the commands it runs,
+# but this script is not one of them, so detach them first; COMPUTERD_URL
+# is set when MOUNT_IGNORE is. A detach is always safe.
 release_native_roots() {
   if [ -n "${COMPUTERD_URL:-}" ]; then
     curl -fsS -X POST "$COMPUTERD_URL/__computerd/native-roots/detach" >/dev/null 2>&1 || true
