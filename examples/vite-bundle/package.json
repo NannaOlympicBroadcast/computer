@@ -13,12 +13,13 @@
     "build:types": "wrangler types"
   },
   "dependencies": {
-    "@cloudflare/computer": "*"
+    "@cloudflare/computer": "*",
+    "just-bash": "^3.0.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.63.0",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
+    "vite": "^8.3.4",
     "wrangler": "^4.148.0"
   }
 }

@@ -75,7 +75,9 @@ import type {
   WorkspaceRuntimeExecOptions,
   WorkspaceRuntimeGetOptions,
   WorkspaceRuntimeKillOptions,
+  WorkspaceRuntimePendingCall,
   WorkspaceRuntimeResult,
+  WorkspaceRuntimeValue,
 } from "./runtime/types.js";
 import { encodeRuntimeEvent } from "./runtime/wire.js";
 import type { Workspace } from "./workspace.js";
@@ -470,6 +472,20 @@ export class WorkspaceRuntimeStub extends RpcTarget {
   disposeExec(id: string, options: { backend?: string } = {}): Promise<void> {
     return this.#ws.runtime.disposeExec(id, options);
   }
+
+  // Plain data both ways, so nothing here needs disposing.
+  pending(): Promise<WorkspaceRuntimePendingCall[]> {
+    return this.#ws.runtime.pending();
+  }
+
+  respond(
+    id: string,
+    callId: string,
+    answer: WorkspaceRuntimeValue,
+    options: { backend?: string } = {},
+  ): Promise<void> {
+    return this.#ws.runtime.respond(id, callId, answer, options);
+  }
 }
 
 // Assets half. Pure value returns: `publish(path, { expiresAfter })
@@ -620,7 +636,6 @@ export class WorkspaceStub extends RpcTarget {
   readonly #git: WorkspaceGitStub;
   readonly #assets: WorkspaceAssetsStub | undefined;
   readonly #artifacts: WorkspaceArtifactsStub;
-  readonly #useThink: boolean;
 
   constructor(ws: Workspace) {
     super();
@@ -629,7 +644,6 @@ export class WorkspaceStub extends RpcTarget {
     this.#git = new WorkspaceGitStub(ws);
     this.#assets = ws.assets === undefined ? undefined : new WorkspaceAssetsStub(ws);
     this.#artifacts = new WorkspaceArtifactsStub(ws.artifacts);
-    this.#useThink = ws.useThink;
     trackStub(this);
   }
 
@@ -650,10 +664,6 @@ export class WorkspaceStub extends RpcTarget {
 
   get fs(): WorkspaceFilesystemStub {
     return this.#fs;
-  }
-
-  get useThink(): boolean {
-    return this.#useThink;
   }
 
   get runtime(): WorkspaceRuntimeStub {

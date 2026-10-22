@@ -1,7 +1,11 @@
 import type { WorkspaceBackendHost } from "../../backend.js";
 import { WorkspaceRuntimeBridge } from "../../runtime/bridge.js";
 import { assertRuntimeValue, WorkspaceRuntimeCapability } from "../../runtime/capability.js";
-import { dynamicWorkerEgress, type WorkspaceEgressPolicy } from "../../runtime/egress.js";
+import {
+  dynamicWorkerEgress,
+  hostEgressFetch,
+  type WorkspaceEgressPolicy,
+} from "../../runtime/egress.js";
 import type {
   ModuleExecutionEnvelope,
   ModuleExecutionInput,
@@ -12,14 +16,37 @@ import type {
   WorkspaceModuleFunctions,
   WorkspaceRuntimeAccess,
   WorkspaceRuntimeEvent,
+  WorkspaceRuntimeInterruptPolicy,
   WorkspaceRuntimeLoader,
+  WorkspaceRuntimePendingCall,
   WorkspaceRuntimeValue,
 } from "../../runtime/types.js";
 import { decodeRuntimeFrames, type RuntimeFrame } from "./frames.js";
 import {
+  answerCall,
+  clearResume,
+  createResumeTables,
+  RESUME_TABLES,
+  ExecutionJournal,
+  fingerprint,
+  fromBase64,
+  INTERRUPT_POLICIES,
+  JOURNAL_VERSION,
+  loadResume,
+  MAX_CONCURRENT_RECOVERIES,
+  journaledCalls,
+  MAX_INTERRUPT_ATTEMPTS,
+  recordAttempt,
+  REPLAY_VERSION,
+  saveResume,
+  toBase64,
+  waitingCalls,
+} from "./journal.js";
+import {
   assertHostModuleExports,
   buildModuleGraph,
   hasNodeModules,
+  internalModuleSources,
   NODE_MODULES_DESCRIPTION,
   type ParsedModules,
   parseModules,
@@ -54,6 +81,86 @@ export interface WorkerJavaScriptBackendOptions {
   modules?: Record<string, WorkspaceModule>;
   defaultTimeoutMs?: number;
   maxTimeoutMs?: number;
+  /**
+   * The most CPU time one execution can use, in milliseconds. Each
+   * execution's CPU limit is the smaller of its timeout and this value.
+   * Defaults to `maxTimeoutMs`, which makes the CPU limit the timeout.
+   *
+   * CPU time adds up over the whole execution, however much of it is spent
+   * waiting. Cloudflare currently stops a Dynamic Worker call at about five
+   * minutes of CPU whatever the limit, so values above 300000 have no
+   * effect.
+   */
+  maxCpuMs?: number;
+  /**
+   * What happens to a run if the Durable Object restarts under it, as on
+   * a deploy or crash. A run's own `onInterrupt` overrides it. Defaults
+   * to `"fail"`.
+   *
+   * - `"fail"` settles the run as failed.
+   * - `"restart"` runs it again from the start, once the backend
+   *   reconnects. Its output so far stays, so the run's output repeats.
+   * - `"replay"` runs it again from the start, but answers every
+   *   filesystem, host module and `fetch` call it already made from a
+   *   journal instead of running it again, in the order the responses
+   *   first arrived. Its clock, timers and random numbers replay too.
+   *   Output already recorded isn't repeated. If the run takes a
+   *   different path, it fails.
+   *
+   * A run is resumed when the backend reconnects, which the next
+   * runtime call, `ready({ all: true })` or `runtime.recover()`
+   * triggers. It gets three attempts, counted again each time it
+   * journals a call, and must finish within its original timeout. A
+   * call in flight at the interruption runs again, unless it's marked
+   * with `unsafeToRepeat()`.
+   *
+   * `"restart"` and `"replay"` are experimental and may change in any
+   * release.
+   */
+  onInterrupt?: WorkspaceRuntimeInterruptPolicy;
+  /**
+   * Called when a host module call starts waiting in `ctx.interrupt()`,
+   * with the fields `runtime.pending()` lists, for example to ask someone
+   * for the answer. It's called once the wait is saved, and at most once
+   * per wait: a crash in between loses the call. Treat `pending()` as the
+   * source of truth, for example by checking it when the object starts.
+   * What it throws is logged and otherwise ignored. Experimental: it may
+   * change in any release.
+   */
+  onWait?: (call: WorkspaceRuntimePendingCall) => void | Promise<void>;
+  /**
+   * How often to schedule a timer while any execution is running, in
+   * milliseconds. Set it to 0 to turn the timer off. Defaults to 60
+   * seconds.
+   *
+   * From compatibility date 2026-10-01, each piece of pending work keeps
+   * a Durable Object in memory for at most 15 minutes from when it starts.
+   * An execution is one call into a Dynamic Worker, so one that goes
+   * quiet, making no host calls and printing nothing, is evicted about 15
+   * minutes after it starts, and the eviction ends it. Host calls and
+   * output also keep the object in memory while they keep coming, but an
+   * execution can't be relied on to make them. Every timer counts as new
+   * pending work, so a timer that keeps rescheduling holds the object in
+   * memory for as long as an execution is running. The interval must be
+   * under 15 minutes.
+   *
+   * The backend reads the host Worker's compatibility flags and schedules
+   * the timer only where it helps, from 2026-10-01 or with
+   * `durable_object_io_tasks_prevent_eviction`.
+   *
+   * An execution stops counting once its timeout plus `maxHostCallMs` has
+   * passed, even if it is still waiting for a host call to settle, so a
+   * host module that never settles can't keep the object in memory
+   * indefinitely. While the timer runs, the object is billed for duration
+   * and can't hibernate.
+   *
+   * On earlier compatibility dates, pending work and timers do not keep a
+   * Durable Object in memory, so no timer is scheduled, and an execution
+   * that outlives the request that started it is evicted after about a
+   * minute. A host on an earlier date needs its own keep-alive, such as an
+   * alarm.
+   */
+  keepAliveIntervalMs?: number;
   maxSourceBytes?: number;
   maxInputBytes?: number;
   maxStdinBytes?: number;
@@ -71,7 +178,7 @@ export interface WorkerJavaScriptBackendOptions {
   maxDirectoryEntries?: number;
   /** Maximum live replay subscribers per execution. Defaults to 8. */
   maxExecutionSubscribers?: number;
-  /** Completed execution retention window. Defaults to five minutes. */
+  /** Completed execution retention window. Defaults to 60 minutes. */
   retentionMs?: number;
   /** Maximum completed executions retained per backend. Defaults to 100. */
   maxRetainedExecutions?: number;
@@ -88,6 +195,9 @@ type ResolvedWorkerJavaScriptBackendOptions = Required<
     | "access"
     | "defaultTimeoutMs"
     | "maxTimeoutMs"
+    | "maxCpuMs"
+    | "onInterrupt"
+    | "keepAliveIntervalMs"
     | "maxSourceBytes"
     | "maxInputBytes"
     | "maxStdinBytes"
@@ -117,6 +227,10 @@ interface WorkspaceExecutionContext {
   env: Record<string, string>;
   cwd: string;
   stdin: Uint8Array;
+  // Set for a replayable run: the seed for its random numbers, the time
+  // its clock starts at, and the order it saw its events in before it was
+  // interrupted, which is empty on the first attempt.
+  durable?: { seed: string; startedAt: number; schedule: number[] };
 }
 
 interface JavaScriptEntrypoint {
@@ -151,6 +265,13 @@ interface ExecutionRecord {
   result?: WorkspaceRuntimeValue;
   hasResult?: boolean;
   exitCode?: number;
+  journal?: ExecutionJournal;
+  // Output a replayed run already recorded. Its frames must repeat these
+  // bytes, which the record checks and doesn't append again.
+  replayed?: Record<"stdout" | "stderr", { bytes: Uint8Array; offset: number }>;
+  // Set while a run's isolate is being released for an interrupt, and
+  // once it is, until the run resumes.
+  waiting?: "releasing" | "released";
 }
 
 export class WorkerJavaScriptBackend implements WorkspaceModuleBackend {
@@ -170,6 +291,22 @@ export class WorkerJavaScriptBackend implements WorkspaceModuleBackend {
     const defaultTimeoutMs = options.defaultTimeoutMs ?? Math.min(60_000, maxTimeoutMs);
     assertPositiveFinite(maxTimeoutMs, "maxTimeoutMs");
     assertPositiveFinite(defaultTimeoutMs, "defaultTimeoutMs");
+    const maxCpuMs = options.maxCpuMs ?? maxTimeoutMs;
+    assertPositiveFinite(maxCpuMs, "maxCpuMs");
+    const onInterrupt = options.onInterrupt ?? "fail";
+    assertInterruptPolicy(onInterrupt);
+    const keepAliveIntervalMs = options.keepAliveIntervalMs ?? 60_000;
+    // Pending work protects a Durable Object for at most 15 minutes, so a
+    // longer interval would leave gaps.
+    if (
+      !Number.isFinite(keepAliveIntervalMs) ||
+      keepAliveIntervalMs < 0 ||
+      keepAliveIntervalMs >= 900_000
+    ) {
+      throw new Error(
+        "WorkerJavaScriptBackend keepAliveIntervalMs must be zero or less than 15 minutes.",
+      );
+    }
     assertPositiveFinite(options.maxSourceBytes ?? 1024 * 1024, "maxSourceBytes");
     assertPositiveFinite(options.maxInputBytes ?? 1024 * 1024, "maxInputBytes");
     assertPositiveFinite(options.maxStdinBytes ?? 256 * 1024, "maxStdinBytes");
@@ -221,6 +358,9 @@ export class WorkerJavaScriptBackend implements WorkspaceModuleBackend {
       access: options.access ?? "read-write",
       defaultTimeoutMs,
       maxTimeoutMs,
+      maxCpuMs,
+      onInterrupt,
+      keepAliveIntervalMs,
       maxSourceBytes: options.maxSourceBytes ?? 1024 * 1024,
       maxInputBytes: options.maxInputBytes ?? 1024 * 1024,
       maxStdinBytes: options.maxStdinBytes ?? 256 * 1024,
@@ -276,9 +416,18 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
   readonly #activeStreams = new Map<string, number>();
   #pendingStarts = 0;
   readonly #pendingStartWaiters = new Set<() => void>();
+  // Running executions, each with the time after which it stops counting
+  // towards the keep-alive.
+  readonly #running = new Map<string, number>();
+  readonly #recoveryQueue: Array<() => void> = [];
+  readonly #recovering = new Set<string>();
+  #keepAlive: ReturnType<typeof setInterval> | undefined;
+  // Zero when the timer is off or can't keep this object in memory.
+  readonly #keepAliveIntervalMs: number;
 
   constructor(options: ResolvedWorkerJavaScriptBackendOptions, host: WorkspaceModuleBackendHost) {
     this.#options = options;
+    this.#keepAliveIntervalMs = hostKeepsPendingWork() ? options.keepAliveIntervalMs : 0;
     this.#host = host;
     const functions = new Map<string, WorkspaceModuleFunctions>();
     const empty = new Set<string>();
@@ -336,26 +485,285 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
         PRIMARY KEY (backend, execution_id, seq)
       )
     `);
+    createResumeTables(host.db);
     this.#prune();
     const interrupted = host.db.all<{ id: string }>(
       `SELECT id FROM workspace_runtime_executions WHERE backend = ? AND status = 'running'`,
       this.#backendId,
     );
-    for (const { id } of interrupted) {
-      const record = this.#recordFor(id);
-      if (record?.status !== "running") continue;
-      this.#finish(record, "failed", [
-        {
+    for (const { id } of interrupted) this.#resumeInterrupted(id);
+    this.#drainRecoveries();
+  }
+
+  // Recovery runs when the backend connects, so there's nothing left to
+  // do by the time the runtime asks.
+  async recover(): Promise<void> {}
+
+  // Start a run the restart interrupted again, if it asked for that and
+  // still can, or settle it as failed.
+  #resumeInterrupted(id: string) {
+    const record = this.#loadRecord(id);
+    if (record?.status !== "running") return;
+    this.#records.set(id, record);
+    const saved = this.#loadResume(record);
+    if (saved === undefined) return;
+    // A run waiting for an answer resumes once it has every one.
+    if (saved.waitingSince !== null) {
+      record.waiting = "released";
+      return;
+    }
+    // Attempts count from the last call the run journaled, so a long run
+    // isn't failed by interruptions spread across it. Its timeout still
+    // bounds how long it can keep going.
+    const progressed = journaledCalls(this.#host.db, this.#backendId, id) > saved.callsAtAttempt;
+    const attempt = progressed ? 1 : saved.attempt;
+    if (attempt >= MAX_INTERRUPT_ATTEMPTS) {
+      this.#failInterrupted(
+        record,
+        `Execution was interrupted ${attempt} times without making progress and won't be started again.`,
+      );
+      return;
+    }
+    this.#queueRelaunch(record, { ...saved, attempt }, true);
+  }
+
+  #loadResume(record: ExecutionRecord) {
+    let saved: ReturnType<typeof loadResume>;
+    try {
+      saved = loadResume(this.#host.db, this.#backendId, record.id);
+    } catch {
+      saved = undefined;
+    }
+    if (saved === undefined) {
+      this.#failInterrupted(
+        record,
+        "Execution was interrupted when its Workspace runtime restarted.",
+      );
+    }
+    return saved;
+  }
+
+  #failInterrupted(record: ExecutionRecord, message: string) {
+    this.#finish(record, "failed", [
+      {
+        id: record.id,
+        seq: record.events.length + 1,
+        name: "stderr",
+        value: new TextEncoder().encode(`${message}\n`),
+      },
+      { id: record.id, seq: record.events.length + 2, name: "exit", code: 1 },
+    ]);
+  }
+
+  // Queue a run to start again, on the runtime code it started on.
+  // Resuming after an answer isn't an attempt.
+  #queueRelaunch(
+    record: ExecutionRecord,
+    saved: NonNullable<ReturnType<typeof loadResume>>,
+    counts: boolean,
+  ) {
+    const { start } = saved;
+    if (start.version !== JOURNAL_VERSION || start.fingerprint !== this.#fingerprint()) {
+      this.#failInterrupted(
+        record,
+        "Execution was interrupted and can't resume, because the JavaScript runtime changed since it started.",
+      );
+      return;
+    }
+    this.#recoveryQueue.push(() => {
+      if (record.status !== "running" || record.finalization) return;
+      this.#recovering.add(record.id);
+      this.#relaunch(record, saved, counts);
+    });
+  }
+
+  // A call interrupted to wait for an answer. Let the run's other calls
+  // finish and be journaled, then release its isolate. The run stays
+  // running and resumes once every waiting call is answered.
+  async #release(record: ExecutionRecord) {
+    const { bridge } = record;
+    if (record.waiting !== undefined || bridge === undefined) return;
+    record.waiting = "releasing";
+    await bridge.quiesce();
+    // It may have settled meanwhile, for example by failing on its own.
+    if (record.status !== "running" || record.finalization) return;
+    record.bridge = undefined;
+    record.control?.cancel();
+    await record.control?.completion.catch(() => undefined);
+    await bridge.cancelAndDrain().catch(() => undefined);
+    record.control = undefined;
+    record.journal = undefined;
+    record.waiting = "released";
+    this.#markSettled(record.id);
+    this.#resumeIfAnswered(record);
+  }
+
+  #notifyWait(record: ExecutionRecord, call: { seq: number; payload: unknown; since: number }) {
+    const { onWait } = this.#options;
+    if (onWait === undefined) return;
+    const pending: WorkspaceRuntimePendingCall = {
+      id: record.id,
+      backend: this.#backendId,
+      callId: `${record.id}:${call.seq}`,
+      payload: call.payload as WorkspaceRuntimeValue,
+      since: call.since,
+    };
+    // After the current call, so the hook can't hold up the run's release.
+    void Promise.resolve()
+      .then(() => onWait(pending))
+      .catch((error: unknown) => {
+        console.error({ message: "onWait failed", id: record.id, error: String(error) });
+      });
+  }
+
+  #resumeIfAnswered(record: ExecutionRecord) {
+    if (record.status !== "running" || record.waiting !== "released") return;
+    const saved = this.#loadResume(record);
+    if (saved === undefined || saved.waitingSince !== null) return;
+    this.#queueRelaunch(record, saved, false);
+    this.#drainRecoveries();
+  }
+
+  async pending(): Promise<Omit<WorkspaceRuntimePendingCall, "backend">[]> {
+    return waitingCalls(this.#host.db, this.#backendId).map((call) => ({
+      id: call.id,
+      callId: `${call.id}:${call.seq}`,
+      payload: call.payload as WorkspaceRuntimeValue,
+      since: call.since,
+    }));
+  }
+
+  async respond(input: { id: string; callId: string; answer: WorkspaceRuntimeValue }) {
+    assertExecutionId(input.id);
+    assertRuntimeValue(input.answer);
+    const record = this.#recordFor(input.id);
+    const prefix = `${input.id}:`;
+    const seq = input.callId.startsWith(prefix) ? Number(input.callId.slice(prefix.length)) : NaN;
+    const waiting =
+      record?.status === "running" && Number.isSafeInteger(seq)
+        ? this.#host.db.transactionSync(() =>
+            answerCall(this.#host.db, this.#backendId, input.id, seq, input.answer),
+          )
+        : undefined;
+    if (record === undefined || waiting === undefined) {
+      throw runtimeError(
+        "ENOTWAITING",
+        `execution ${input.id} has no call ${input.callId} waiting for an answer`,
+      );
+    }
+    if (waiting === 0) this.#resumeIfAnswered(record);
+  }
+
+  // A Durable Object can run only so many Dynamic Workers at once, and
+  // new executions need some of them, so interrupted runs start a few at
+  // a time. Each one that settles lets the next start.
+  #drainRecoveries() {
+    while (this.#recovering.size < MAX_CONCURRENT_RECOVERIES) {
+      const next = this.#recoveryQueue.shift();
+      if (next === undefined) return;
+      next();
+    }
+  }
+
+  #relaunch(
+    record: ExecutionRecord,
+    { policy, attempt, start, waitedMs }: NonNullable<ReturnType<typeof loadResume>>,
+    counts: boolean,
+  ) {
+    const id = record.id;
+    const fail = (message: string) => this.#failInterrupted(record, message);
+    // A run's timeout counts from when it first started, including the
+    // time it spent interrupted or waiting to resume, but not the time it
+    // waited for answers.
+    const remainingMs = start.startedAt + start.timeoutMs + waitedMs - Date.now();
+    if (remainingMs <= 0) {
+      fail("Execution was interrupted and its timeout passed before it could resume.");
+      return;
+    }
+    record.waiting = undefined;
+    try {
+      // An answer counts as progress, so the run's attempts start again.
+      recordAttempt(
+        this.#host.db,
+        this.#backendId,
+        id,
+        counts ? attempt + 1 : 1,
+        journaledCalls(this.#host.db, this.#backendId, id),
+      );
+      let journal: ExecutionJournal | undefined;
+      let durable: WorkspaceExecutionContext["durable"];
+      if (policy === "replay") {
+        journal = this.#journalFor(record);
+        durable = { seed: start.seed, startedAt: start.startedAt, schedule: journal.schedule() };
+        record.replayed = {
+          stdout: { bytes: recordedOutput(record.events, "stdout"), offset: 0 },
+          stderr: { bytes: recordedOutput(record.events, "stderr"), offset: 0 },
+        };
+      } else {
+        this.#append(record, {
           id,
           seq: record.events.length + 1,
           name: "stderr",
           value: new TextEncoder().encode(
-            "Execution was interrupted when its Workspace runtime restarted.\n",
+            "Execution restarted from the beginning after its Workspace runtime was interrupted.\n",
           ),
+        });
+      }
+      void this.#launch(record, {
+        capability: this.#capability(),
+        modules: start.modules,
+        entryName: start.entryName,
+        input: start.input,
+        context: {
+          env: start.env,
+          cwd: start.cwd,
+          stdin: fromBase64(start.stdin),
+          ...(durable === undefined ? {} : { durable }),
         },
-        { id, seq: record.events.length + 2, name: "exit", code: 1 },
-      ]);
+        timeoutMs: remainingMs,
+        cpuMs: start.cpuMs,
+        journal,
+      });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  // What a run depends on to replay the same way. A run resumes only on
+  // the same. The runtime's own code is covered by REPLAY_VERSION, so an
+  // upgrade that doesn't change replay doesn't fail interrupted runs.
+  #fingerprint(): string {
+    return fingerprint([
+      String(REPLAY_VERSION),
+      String(this.#options.maxStdioBytes),
+      String(this.#options.maxCapabilityBytes),
+      this.#options.compatibilityDate,
+      this.#options.compatibilityFlags.join(","),
+    ]);
+  }
+
+  #journalFor(record: ExecutionRecord): ExecutionJournal {
+    return new ExecutionJournal(this.#host.db, this.#backendId, record.id, (message) =>
+      this.#diverge(record, message),
+    );
+  }
+
+  // A replayed run called something its journal doesn't hold. Stop it
+  // now, before it acts on a state the journal can't account for.
+  #diverge(record: ExecutionRecord, message: string) {
+    if (record.status !== "running" || record.finalization) return;
+    record.control?.cancel();
+    void this.#finalize(record, message);
+  }
+
+  #capability(): WorkspaceRuntimeCapability {
+    return new WorkspaceRuntimeCapability(
+      this.#host.fs,
+      this.#options.root,
+      this.#options.access,
+      this.#options.maxCapabilityBytes,
+      this.#options.maxDirectoryEntries,
+    );
   }
 
   // Parsing a large bundle on every run would be wasteful, so source
@@ -397,6 +805,8 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
       throw new Error(`Workspace runtime stdin exceeds ${this.#options.maxStdinBytes} bytes.`);
     }
     assertEnv(input.env, this.#options.maxEnvBytes);
+    const policy = input.onInterrupt ?? this.#options.onInterrupt;
+    assertInterruptPolicy(policy);
     if (new TextEncoder().encode(input.source).byteLength > this.#options.maxSourceBytes) {
       throw new Error(`Workspace runtime source exceeds ${this.#options.maxSourceBytes} bytes.`);
     }
@@ -408,13 +818,7 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
     try {
       if (this.#options.access === "read-write")
         await ensureDirectory(this.#host.fs, this.#options.root);
-      const capability = new WorkspaceRuntimeCapability(
-        this.#host.fs,
-        this.#options.root,
-        this.#options.access,
-        this.#options.maxCapabilityBytes,
-        this.#options.maxDirectoryEntries,
-      );
+      const capability = this.#capability();
       const graph = await buildModuleGraph({
         source: input.source,
         cwd: input.cwd ?? this.#options.root,
@@ -453,50 +857,52 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
         throw error;
       }
       this.#records.set(id, record);
+      const context: WorkspaceExecutionContext = {
+        env: input.env ?? {},
+        cwd: input.cwd ?? this.#options.root,
+        stdin: stdinBytes,
+      };
+      const cpuMs = Math.min(timeoutMs, this.#options.maxCpuMs);
+      let journal: ExecutionJournal | undefined;
       try {
-        const bridge = new WorkspaceRuntimeBridge(capability, {
-          hostModules: this.#hostModuleFunctions,
-          maxPayloadBytes: this.#options.maxCapabilityBytes,
-          maxCallDurationMs: this.#options.maxHostCallMs,
-          maxConcurrentCalls: this.#options.maxConcurrentCapabilityCalls,
-          maxCalls: this.#options.maxCapabilityCalls,
-          maxTotalRequestBytes: this.#options.maxCapabilityRequestBytes,
-          maxTotalResponseBytes: this.#options.maxCapabilityResponseBytes,
-          maxResultBytes: this.#options.maxResultBytes,
-          onAttachOutput: (readable) => this.#pumpFrames(record, readable),
-        });
-        record.bridge = bridge;
-        record.control = startJavaScriptExecution({
-          loader: this.#options.loader,
-          modules: graph.modules,
-          entryName: graph.entryName,
-          input: inputValue,
-          context: {
-            env: input.env ?? {},
-            cwd: input.cwd ?? this.#options.root,
-            stdin: stdinBytes,
-          },
-          bridge,
-          timeoutMs,
-          egress: this.#options.egress,
-          compatibilityDate: this.#options.compatibilityDate,
-          compatibilityFlags: this.#options.compatibilityFlags,
-          maxStdioBytes: this.#options.maxStdioBytes,
-          maxSourceBytes: this.#options.maxSourceBytes,
-          onComplete: () => this.#finalize(record),
-          onError: (message) => this.#finalize(record, message),
-        });
-        // The completion promise drives finalize (which writes the
-        // terminal SQL) and is no longer handed to a host lifetime
-        // hook. Observe it so a finalize rejection surfaces as a
-        // swallowed error rather than an unhandled rejection in the
-        // Durable Object.
-        void record.control.completion.catch(() => undefined);
+        if (policy !== "fail") {
+          const startedAt = Date.now();
+          const seed = [...crypto.getRandomValues(new Uint8Array(32))]
+            .map((byte) => byte.toString(16).padStart(2, "0"))
+            .join("");
+          saveResume(this.#host.db, this.#backendId, id, policy, {
+            version: JOURNAL_VERSION,
+            modules: graph.modules,
+            entryName: graph.entryName,
+            input: inputValue,
+            env: context.env,
+            cwd: context.cwd,
+            stdin: toBase64(stdinBytes),
+            timeoutMs,
+            cpuMs,
+            startedAt,
+            seed,
+            fingerprint: this.#fingerprint(),
+          });
+          if (policy === "replay") {
+            journal = this.#journalFor(record);
+            context.durable = { seed, startedAt, schedule: [] };
+          }
+        }
       } catch (error) {
-        record.control?.cancel();
-        await record.control?.completion.catch(() => undefined);
         await this.#finalize(record, error instanceof Error ? error.message : String(error));
+        return { id, events: this.#stream(record) };
       }
+      await this.#launch(record, {
+        capability,
+        modules: graph.modules,
+        entryName: graph.entryName,
+        input: inputValue,
+        context,
+        timeoutMs,
+        cpuMs,
+        journal,
+      });
       return { id, events: this.#stream(record) };
     } finally {
       this.#pendingIds.delete(id);
@@ -505,6 +911,72 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
         for (const resolve of this.#pendingStartWaiters) resolve();
         this.#pendingStartWaiters.clear();
       }
+    }
+  }
+
+  // Start a run's Dynamic Worker. A failure to start settles the run.
+  async #launch(
+    record: ExecutionRecord,
+    spec: {
+      capability: WorkspaceRuntimeCapability;
+      modules: Record<string, string | { js?: string }>;
+      entryName: string;
+      input: WorkspaceRuntimeValue;
+      context: WorkspaceExecutionContext;
+      timeoutMs: number;
+      cpuMs: number;
+      journal: ExecutionJournal | undefined;
+    },
+  ): Promise<void> {
+    this.#markRunning(record.id, spec.timeoutMs);
+    try {
+      const bridge = new WorkspaceRuntimeBridge(spec.capability, {
+        hostModules: this.#hostModuleFunctions,
+        maxPayloadBytes: this.#options.maxCapabilityBytes,
+        maxCallDurationMs: this.#options.maxHostCallMs,
+        maxConcurrentCalls: this.#options.maxConcurrentCapabilityCalls,
+        maxCalls: this.#options.maxCapabilityCalls,
+        maxTotalRequestBytes: this.#options.maxCapabilityRequestBytes,
+        maxTotalResponseBytes: this.#options.maxCapabilityResponseBytes,
+        maxResultBytes: this.#options.maxResultBytes,
+        onAttachOutput: (readable) => this.#pumpFrames(record, readable),
+        callIdPrefix: record.id,
+        onWait: (call) => {
+          this.#notifyWait(record, call);
+          void this.#release(record);
+        },
+        ...hostEgressFetch(this.#options.egress),
+        ...(spec.journal === undefined ? {} : { journal: spec.journal }),
+      });
+      record.bridge = bridge;
+      record.journal = spec.journal;
+      record.control = startJavaScriptExecution({
+        loader: this.#options.loader,
+        modules: spec.modules,
+        entryName: spec.entryName,
+        input: spec.input,
+        context: spec.context,
+        bridge,
+        timeoutMs: spec.timeoutMs,
+        cpuMs: spec.cpuMs,
+        egress: this.#options.egress,
+        compatibilityDate: this.#options.compatibilityDate,
+        compatibilityFlags: this.#options.compatibilityFlags,
+        maxStdioBytes: this.#options.maxStdioBytes,
+        maxSourceBytes: this.#options.maxSourceBytes,
+        onComplete: () => this.#finalize(record),
+        onError: (message) => this.#finalize(record, message),
+      });
+      // The completion promise drives finalize (which writes the
+      // terminal SQL) and is no longer handed to a host lifetime
+      // hook. Observe it so a finalize rejection surfaces as a
+      // swallowed error rather than an unhandled rejection in the
+      // Durable Object.
+      void record.control.completion.catch(() => undefined);
+    } catch (error) {
+      record.control?.cancel();
+      await record.control?.completion.catch(() => undefined);
+      await this.#finalize(record, error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -559,6 +1031,44 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
     await Promise.allSettled(finalizations);
     for (const record of records) this.#close(record);
     this.#records.clear();
+    this.#running.clear();
+    this.#syncKeepAlive();
+  }
+
+  // An execution normally settles by its timeout. Finalizing then waits
+  // for host calls it already accepted, which can take up to
+  // `maxHostCallMs` for a well-behaved host module. A run still going past
+  // both stops counting, so a host module that never settles can't keep
+  // the object in memory indefinitely.
+  #markRunning(id: string, timeoutMs: number) {
+    this.#running.set(id, Date.now() + timeoutMs + this.#options.maxHostCallMs);
+    this.#syncKeepAlive();
+  }
+
+  #markSettled(id: string) {
+    this.#running.delete(id);
+    this.#syncKeepAlive();
+    if (this.#recovering.delete(id)) this.#drainRecoveries();
+  }
+
+  // Hold the Durable Object in memory while any execution runs. Scheduling
+  // the timer is what counts as pending work; when it fires it only drops
+  // executions past their keep-alive deadline. See `keepAliveIntervalMs`.
+  #syncKeepAlive() {
+    if (this.#running.size > 0 && this.#keepAliveIntervalMs > 0) {
+      this.#keepAlive ??= setInterval(() => this.#expireKeepAlive(), this.#keepAliveIntervalMs);
+    } else if (this.#keepAlive !== undefined) {
+      clearInterval(this.#keepAlive);
+      this.#keepAlive = undefined;
+    }
+  }
+
+  #expireKeepAlive() {
+    const now = Date.now();
+    for (const [id, until] of this.#running) {
+      if (now > until) this.#running.delete(id);
+    }
+    this.#syncKeepAlive();
   }
 
   get #backendId(): string {
@@ -603,30 +1113,12 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
   #recordFor(id: string): ExecutionRecord | undefined {
     const cached = this.#records.get(id);
     if (cached) return cached;
-    const row = this.#host.db.one<{ status: ExecutionRecord["status"] }>(
-      `SELECT status FROM workspace_runtime_executions WHERE backend = ? AND id = ?`,
-      this.#backendId,
-      id,
-    );
-    if (!row) return undefined;
-    const events = this.#host.db
-      .all<{ seq: number; name: WorkspaceRuntimeEvent["name"]; payload: Uint8Array }>(
-        `SELECT seq, name, payload FROM workspace_runtime_events
-         WHERE backend = ? AND execution_id = ? ORDER BY seq`,
-        this.#backendId,
-        id,
-      )
-      .map((event) => decodeEvent(id, event.seq, event.name, event.payload));
-    const record: ExecutionRecord = {
-      id,
-      status: row.status,
-      events,
-      subscribers: new Set(),
-    };
-    if (record.status === "running") {
-      // Every live execution is cached before its Dynamic Worker starts. A
-      // durable running row without a cached record is therefore an orphan
-      // left by restart or a failed terminal transaction.
+    const record = this.#loadRecord(id);
+    if (record?.status === "running") {
+      // Every live execution is cached before its Dynamic Worker starts,
+      // and recovery caches the ones it resumes. A durable running row
+      // without a cached record is therefore an orphan left by a failed
+      // terminal transaction.
       this.#records.set(id, record);
       this.#finish(record, "failed", [
         {
@@ -643,10 +1135,31 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
     return record;
   }
 
+  #loadRecord(id: string): ExecutionRecord | undefined {
+    const row = this.#host.db.one<{ status: ExecutionRecord["status"] }>(
+      `SELECT status FROM workspace_runtime_executions WHERE backend = ? AND id = ?`,
+      this.#backendId,
+      id,
+    );
+    if (!row) return undefined;
+    const events = this.#host.db
+      .all<{ seq: number; name: WorkspaceRuntimeEvent["name"]; payload: Uint8Array }>(
+        `SELECT seq, name, payload FROM workspace_runtime_events
+         WHERE backend = ? AND execution_id = ? ORDER BY seq`,
+        this.#backendId,
+        id,
+      )
+      .map((event) => decodeEvent(id, event.seq, event.name, event.payload));
+    return { id, status: row.status, events, subscribers: new Set() };
+  }
+
   // Drain the runner's framed output stream live, ingesting each frame
   // as it arrives. Resolves when the stream closes, which is the
   // signal the runner's evaluate awaits before returning.
   async #pumpFrames(record: ExecutionRecord, readable: ReadableStream<Uint8Array>) {
+    // A run released for an interrupt has moved on from this attempt, and
+    // whatever its isolate writes on the way out isn't the run's output.
+    const attempt = record.bridge;
     const reader = decodeRuntimeFrames(readable).getReader();
     try {
       while (true) {
@@ -667,7 +1180,7 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
           if (record.status !== "running") break;
           throw error;
         }
-        if (next.done) break;
+        if (next.done || record.bridge !== attempt) break;
         this.#ingestFrame(record, next.value);
       }
     } finally {
@@ -680,12 +1193,39 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
   // stream but only settle the terminal state in #finalize.
   #ingestFrame(record: ExecutionRecord, frame: RuntimeFrame) {
     if (record.status !== "running") return;
+    // Saved with the output in one transaction, so output never outlives
+    // the log of the events that led to it.
+    if (frame.log !== undefined) {
+      try {
+        record.journal?.record(frame.log.from, frame.log.events);
+      } catch (error) {
+        this.#diverge(record, error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     if (frame.name === "stdout" || frame.name === "stderr") {
+      let value = frame.value;
+      const replayed = record.replayed?.[frame.name];
+      if (replayed !== undefined && replayed.offset < replayed.bytes.byteLength) {
+        const end = Math.min(replayed.bytes.byteLength, replayed.offset + value.byteLength);
+        const expected = replayed.bytes.subarray(replayed.offset, end);
+        if (!bytesEqual(value.subarray(0, expected.byteLength), expected)) {
+          this.#diverge(
+            record,
+            "The execution took a different path when it resumed after an interruption: " +
+              `it wrote different ${frame.name} from the first time.`,
+          );
+          return;
+        }
+        replayed.offset = end;
+        value = value.subarray(expected.byteLength);
+        if (value.byteLength === 0) return;
+      }
       this.#append(record, {
         id: record.id,
         seq: record.events.length + 1,
         name: frame.name,
-        value: frame.value,
+        value,
       });
     } else {
       record.exitCode = frame.code;
@@ -699,12 +1239,29 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
   #finalize(record: ExecutionRecord, errorMessage?: string): Promise<void> {
     if (record.finalization) return record.finalization;
     if (record.status !== "running") return Promise.resolve();
+    // Its isolate ending for an interrupt isn't the run ending.
+    if (record.waiting === "released") return Promise.resolve();
     const finalization = this.#finalizeOnce(record, errorMessage);
     record.finalization = finalization;
     return finalization;
   }
 
   async #finalizeOnce(record: ExecutionRecord, errorMessage?: string) {
+    const expected = record.journal?.expectedCall();
+    if (errorMessage === undefined && expected !== undefined) {
+      errorMessage =
+        "The execution took a different path when it resumed after an interruption: " +
+        `it finished without calling ${expected} again.`;
+    }
+    const unwritten = (["stdout", "stderr"] as const).find((name) => {
+      const replayed = record.replayed?.[name];
+      return replayed !== undefined && replayed.offset < replayed.bytes.byteLength;
+    });
+    if (errorMessage === undefined && unwritten !== undefined) {
+      errorMessage =
+        "The execution took a different path when it resumed after an interruption: " +
+        `it finished without writing all the ${unwritten} it wrote the first time.`;
+    }
     try {
       await record.bridge?.cancelAndDrain();
     } catch (error) {
@@ -829,6 +1386,7 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
           record.id,
         );
         for (const event of events) this.#persistEvent(record.id, event);
+        clearResume(this.#host.db, this.#backendId, record.id);
       });
     } catch {
       // The execution must settle even if durable storage is unavailable.
@@ -850,6 +1408,7 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
     }
     record.status = settledStatus;
     record.events.push(...settledEvents);
+    this.#markSettled(record.id);
     for (const subscriber of [...record.subscribers]) this.#pump(record, subscriber);
     this.#close(record);
     if (!record.persistenceFailed) {
@@ -930,6 +1489,18 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
         this.#backendId,
         cutoff,
       );
+      // Saved start data and journals belong to running executions only.
+      // Anything else was left by a terminal state that wasn't persisted.
+      for (const table of RESUME_TABLES) {
+        this.#host.db.run(
+          `DELETE FROM ${table}
+           WHERE backend = ? AND execution_id NOT IN (
+             SELECT id FROM workspace_runtime_executions WHERE backend = ? AND status = 'running'
+           )`,
+          this.#backendId,
+          this.#backendId,
+        );
+      }
       const excess = this.#host.db.all<{ id: string }>(
         `SELECT id FROM workspace_runtime_executions
          WHERE backend = ? AND status != 'running'
@@ -952,6 +1523,19 @@ class JavaScriptBackendHandle implements WorkspaceModuleBackendHandle {
       }
     });
   }
+}
+
+// Whether pending work keeps this Durable Object in memory, which the host
+// Worker's compatibility date decides: from 2026-10-01 it does, before it
+// doesn't, and a keep-alive timer would do nothing. The Dynamic Worker's
+// own compatibility date plays no part. Outside the Workers runtime the
+// flags aren't there to read, and the timer is scheduled, which is
+// harmless.
+function hostKeepsPendingWork(): boolean {
+  const flags = (
+    globalThis as { Cloudflare?: { compatibilityFlags?: Record<string, boolean | undefined> } }
+  ).Cloudflare?.compatibilityFlags;
+  return flags?.durable_object_io_tasks_prevent_eviction ?? true;
 }
 
 function encodeEvent(event: WorkspaceRuntimeEvent): Uint8Array {
@@ -988,6 +1572,7 @@ function startJavaScriptExecution(options: {
   context: WorkspaceExecutionContext;
   bridge: WorkspaceRuntimeBridge;
   timeoutMs: number;
+  cpuMs: number;
   egress: WorkspaceEgressPolicy;
   compatibilityDate: string;
   compatibilityFlags: string[];
@@ -1004,7 +1589,7 @@ function startJavaScriptExecution(options: {
   const worker = options.loader.load({
     compatibilityDate: options.compatibilityDate,
     compatibilityFlags: options.compatibilityFlags,
-    limits: { cpuMs: options.timeoutMs },
+    limits: { cpuMs: options.cpuMs },
     mainModule: "workspace-runtime-runner.js",
     modules,
     ...dynamicWorkerEgress(options.egress),
@@ -1012,7 +1597,7 @@ function startJavaScriptExecution(options: {
   let entrypoint: JavaScriptEntrypoint;
   try {
     entrypoint = worker.getEntrypoint(undefined, {
-      limits: { cpuMs: options.timeoutMs },
+      limits: { cpuMs: options.cpuMs },
     }) as JavaScriptEntrypoint;
   } catch (error) {
     disposeQuietly(worker as { [Symbol.dispose]?: () => void });
@@ -1081,10 +1666,22 @@ function startJavaScriptExecution(options: {
   };
 }
 
+/**
+ * The code the runtime loads into the isolate besides the run's own, for
+ * the test that asks whether REPLAY_VERSION needs a bump.
+ */
+export function runtimeCode(entryName: string, maxStdioBytes: number, maxCapabilityBytes: number) {
+  return [
+    runtimeWorkerModule(entryName, maxStdioBytes),
+    ...internalModuleSources(maxCapabilityBytes),
+  ];
+}
+
 function runtimeWorkerModule(entryName: string, maxStdioBytes: number) {
   return `
     import { WorkerEntrypoint } from "cloudflare:workers";
-    import { install, moduleScopeRefusals } from "workspace-capabilities.js";
+    import { call, install, moduleScopeRefusals } from "workspace-capabilities.js";
+    import { install as installDurable, takeLog } from "workspace-durable.js";
 
     // A promise nobody awaits would otherwise fail without a trace while
     // the run reports success. Track the rejections nothing handled, and
@@ -1163,6 +1760,8 @@ function runtimeWorkerModule(entryName: string, maxStdioBytes: number) {
         // task awaits writeChain before closing.
         let writeChain = Promise.resolve();
         const enqueue = (frame) => {
+          const log = takeLog();
+          if (log !== undefined) frame.log = log;
           const bytes = encoder.encode(JSON.stringify(frame) + "\\n");
           writeChain = writeChain.then(() => writer.write(bytes)).catch(() => {});
         };
@@ -1233,6 +1832,11 @@ function runtimeWorkerModule(entryName: string, maxStdioBytes: number) {
           return "";
         };
         install(host);
+        // A replayable run gets a clock, timers, random numbers and fetch
+        // that replay the way they went the first time.
+        // The runner keeps the real timer for itself.
+        const realSetTimeout = globalThis.setTimeout;
+        if (context && context.durable) installDurable(context.durable, host, call);
         // Hand the readable end to the host, which drains it live while
         // this call stays in flight. Keeping evaluate in flight is what
         // holds the host bridge stub alive for the whole run; frames
@@ -1245,7 +1849,7 @@ function runtimeWorkerModule(entryName: string, maxStdioBytes: number) {
             ? await module.default(input)
             : module.default ?? null;
           // Rejections are reported after the microtask queue drains.
-          await new Promise((resolve) => setTimeout(resolve, 0));
+          await new Promise((resolve) => realSetTimeout(resolve, 0));
           if (moduleScopeRefusals.length > 0) throw moduleScopeRefusals[0];
           for (const reason of unhandled.values()) {
             const message = reason instanceof Error ? reason.message : String(reason);
@@ -1362,6 +1966,12 @@ function assertPositiveInteger(value: number, name: string) {
   }
 }
 
+function assertInterruptPolicy(value: unknown): asserts value is WorkspaceRuntimeInterruptPolicy {
+  if (!INTERRUPT_POLICIES.includes(value as WorkspaceRuntimeInterruptPolicy)) {
+    throw new Error('onInterrupt must be "fail", "restart" or "replay".');
+  }
+}
+
 function assertExecutionId(id: string) {
   if (typeof id !== "string" || id.length === 0) {
     throw new Error("Workspace runtime execution id must be a non-empty string.");
@@ -1393,4 +2003,24 @@ function disposeQuietly(value: { [Symbol.dispose]?: () => void }) {
   try {
     value[Symbol.dispose]?.();
   } catch {}
+}
+
+function recordedOutput(
+  events: readonly WorkspaceRuntimeEvent[],
+  name: "stdout" | "stderr",
+): Uint8Array {
+  const chunks = events.flatMap((event) => (event.name === name ? [event.value] : []));
+  const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+  return true;
 }

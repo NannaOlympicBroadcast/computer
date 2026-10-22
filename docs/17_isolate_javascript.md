@@ -1,5 +1,10 @@
 # Isolate JavaScript runtime
 
+> [!NOTE]
+> **Stable.** `WorkerJavaScriptBackend` and its host modules are
+> suitable for production use, except `ws:container`, which runs on the
+> experimental container backend. See the [status table](../packages/computer/README.md#status).
+
 `WorkerJavaScriptBackend` runs an ECMAScript module in a fresh Cloudflare Dynamic Worker:
 
 ```ts
@@ -71,7 +76,7 @@ A call made while the module loads fails the run with an error that names the ca
 
 The returned value becomes the result's `value` and must be JSON-compatible plain data. As with `JSON.stringify`, an `undefined` object field is left out, so `{ kept: 1, dropped: undefined }` completes as `{ kept: 1 }`, and returning `undefined` gives `null`. A function, a class instance such as a `Date`, an `undefined` array item, or a cycle fails the run. `options.input` is checked the same way.
 
-`runtime.exec()` returns before the Dynamic Worker finishes: the run keeps advancing while its event stream is consumed and the host call into the Dynamic Worker stays in flight. That pending work keeps the Durable Object resident on its own. A run whose handle is returned but never read can be evicted once the object goes idle; drain the event stream (or `result()`) to keep the run alive, and schedule an alarm through `ctx.storage.setAlarm()` for work that must survive eviction.
+`runtime.exec()` returns before the Dynamic Worker finishes, and the run keeps going whether or not anything reads its event stream. [Long-running executions](#long-running-executions) covers how long a run can last.
 
 ## Durable imports
 
@@ -109,6 +114,129 @@ Completed execution records remain available for replay for sixty minutes by def
 Cancellation stops new host capability calls, disposes the Dynamic Worker, and waits for host calls that were already accepted. Exit 130 is published only after those calls settle. Normal completion uses the same drain rule, so an unawaited capability call cannot mutate the workspace after exit 0.
 
 Host calls have a caller-visible deadline, controlled by `maxHostCallMs` and defaulting to `maxTimeoutMs`. Missing the deadline fails the capability call and marks the execution failed, even if caller code catches that error. Execution still waits for the accepted host operation itself before publishing a terminal event because many host APIs cannot roll back an external side effect after dispatch. Host module functions receive a `signal` in their context and must stop promptly when it aborts. A host module that ignores cancellation and never settles will keep execution in its finalizing state. `compatibilityDate` and `compatibilityFlags` control the Dynamic Worker runtime and default to the package-tested settings.
+
+## Long-running executions
+
+An execution runs until its code returns or its timeout passes, and `maxTimeoutMs` caps the timeout at 3 minutes by default. Several other limits apply to the whole execution, so a long run reaches them sooner:
+
+| Option | Default | Counts |
+|---|---|---|
+| `maxCapabilityCalls` | 256 | every filesystem and host module call |
+| `maxCapabilityRequestBytes` | 8 MiB | bytes sent to those calls, in total |
+| `maxCapabilityResponseBytes` | 8 MiB | bytes returned by those calls, in total |
+| `maxStdioBytes` | 1 MiB | standard output and standard error, in total; output past it is dropped |
+
+Raise the ones a long run needs along with the timeout:
+
+```ts
+new WorkerJavaScriptBackend({
+  loader: env.LOADER,
+  maxTimeoutMs: 2 * 60 * 60_000,
+  maxCapabilityCalls: 100_000,
+  maxCapabilityResponseBytes: 256 * 1024 * 1024,
+});
+```
+
+`maxHostCallMs` defaults to `maxTimeoutMs`, so it grows with it.
+
+A run also needs its Durable Object to stay in memory, and that depends on the host Worker's compatibility date. From 2026-10-01, each piece of pending work keeps a Durable Object in memory for up to 15 minutes from when it starts. A run that keeps making host calls or printing output keeps renewing that, but a quiet one, such as a run waiting on one slow `fetch`, would be evicted 15 minutes after it started. To cover that case, the backend schedules a timer every `keepAliveIntervalMs` (60 seconds by default) while any run is in flight, and each timer counts as new pending work. A run stops counting once its timeout plus `maxHostCallMs` has passed, even if it is still waiting for a host call to settle. While the timer runs, the object is billed for duration and can't hibernate. The backend reads the host Worker's compatibility flags when it connects and schedules the timer only from 2026-10-01, or with `durable_object_io_tasks_prevent_eviction`. On earlier compatibility dates, pending work and timers don't keep a Durable Object in memory, so no timer is scheduled, and a run that outlives the request that started it is evicted about a minute after that request ends, unless the request awaits the run or the host keeps the object in memory itself, for example with an alarm.
+
+CPU time is limited separately from wall-clock time. Each run's CPU limit is the smaller of its timeout and `maxCpuMs`, which defaults to `maxTimeoutMs`. CPU time adds up over the whole run, however much of it is spent waiting, and Cloudflare currently stops a Dynamic Worker call at about five minutes of CPU whatever the limit. A run that mostly waits on I/O uses little of that and can last hours. A run that computes heavily fails with `Worker exceeded CPU time limit.` once it reaches the cap. Every execution gets a fresh Dynamic Worker and a fresh CPU budget, so heavy work can be split across executions or moved to a container. The platform's subrequest limit, 10,000 by default on the Workers Paid plan, also counts every `fetch` over the whole run. A long run also holds one of the ten Dynamic Workers a Durable Object can have in flight for as long as it lasts.
+
+A deploy or a crash still ends a run. See [Interrupted executions](#interrupted-executions) for what happens next.
+
+## Interrupted executions
+
+A deploy or a crash restarts the Durable Object and ends every run in flight. `onInterrupt` decides what happens to those runs. Set a default on the backend and override it per run:
+
+```ts
+const backend = new WorkerJavaScriptBackend({ loader: env.LOADER, onInterrupt: "replay" });
+
+await workspace.runtime.exec(source, { onInterrupt: "fail" });
+```
+
+| Policy | After a restart |
+|---|---|
+| `"fail"` (default) | The run fails with exit 1. |
+| `"restart"` | The run starts again from the beginning. Calls it already made run again, and its output repeats after a note on standard error. |
+| `"replay"` | The run starts again from the beginning, but every call it already made is answered from a journal instead of running again, and its output isn't repeated. Once it catches up, it carries on live. |
+
+The code being run doesn't need to change for either. `"restart"` and `"replay"` are [experimental](../packages/computer/README.md#status): their behavior and stored data may change in any release, and a run interrupted across such an upgrade fails instead of resuming.
+
+### When a run resumes
+
+Interrupted runs resume when the backend next connects, which the next runtime call such as `exec()` or `getExec()` triggers, as does `workspace.ready({ all: true })`. A caller polling a run or reconnecting to its output does this on its own. Nothing else wakes a Durable Object after a deploy, so a run nobody is waiting on stays interrupted until something calls the object, and fails if its timeout passes first. To resume runs without waiting for traffic, call `workspace.runtime.recover()` from the Durable Object's alarm. The Workspace doesn't set an alarm itself, since a Durable Object only has one.
+
+### How replay works
+
+A replayable run saves its code, input and limits when it starts. Every filesystem call, host module call and `fetch` it makes is written to a journal in SQLite before the run sees the response. On replay, the run starts from the top and gets those responses back from the journal, in the order it first saw them, so a `Promise.race` or a timer racing a call goes the same way.
+
+A replayable run also gets versions of a few APIs that would otherwise differ between attempts:
+
+- `Date.now()`, `new Date()` and `performance.now()` read a clock that gives the same times on replay.
+- `setTimeout`, `setInterval`, `scheduler.wait()` and `AbortSignal.timeout()` fire in the same order on replay, without waiting out delays they already waited.
+- `Math.random()`, `crypto.getRandomValues()` and `crypto.randomUUID()` return the same values, from a random seed saved with the run.
+- `fetch` goes through the host, under the backend's egress policy, so a replay doesn't send a request again.
+
+A replay has to take the same path as the first attempt: the same calls, with the same arguments, printing the same output. If it doesn't, the run fails with a message saying where it went differently. Everything saved for a run is deleted when it settles.
+
+### Calls that mustn't run twice
+
+A call still running when the object restarted never returned, so the replay runs it again. Each host module call gets a `context.callId` that stays the same when that happens, so a function can pass it on as an idempotency key. A function that can't, such as one that charges a card, can be wrapped in `unsafeToRepeat()`, and an interruption during it fails the run instead:
+
+```ts
+import { unsafeToRepeat } from "@cloudflare/computer";
+
+modules: {
+  "ws:billing": {
+    charge: unsafeToRepeat(async ([order, cents]) => billing.charge(order, cents)),
+    refund: async ([order], { callId }) => billing.refund(order, { idempotencyKey: callId }),
+  },
+}
+```
+
+### Waiting for an answer
+
+A host module function can pause a replayable run until someone answers, for example to approve an action. Like replay, this is experimental. The code being run just calls the function and gets its result, however long the answer takes:
+
+```ts
+modules: {
+  "ws:github": {
+    postComment: async ([issue, body], ctx) => {
+      const { approved } = await ctx.interrupt({ kind: "approval", issue, body });
+      if (!approved) throw new Error("The comment was rejected.");
+      return github.comment(issue, body, { idempotencyKey: ctx.callId });
+    },
+  },
+}
+```
+
+`ctx.interrupt(payload)` releases the run's isolate once the run's other calls in flight finish. The run stays running, and time spent waiting doesn't count toward its timeout. `workspace.runtime.pending()` lists the calls waiting, with their payloads, and `respond()` answers one:
+
+```ts
+for (const call of await workspace.runtime.pending()) {
+  await workspace.runtime.respond(call.id, call.callId, { approved: true });
+}
+```
+
+To hear about a wait when it starts, for example to message whoever answers, give the backend an `onWait` function. It gets the same fields, at most once per wait, so `pending()` stays the source of truth. A Worker that calls the object can reach `pending()` and `respond()` through `workspace.stub().runtime`.
+
+Once none of its calls are waiting, the run replays to the call and the function runs again with the same `callId`. This time `interrupt()` returns the answer straight away, and the function carries on. Anything it does before `interrupt()` runs twice, so keep that part safe to repeat. A waiting run survives a deploy like any interrupted run, and `killExec()` ends one.
+
+- A call can interrupt once. A second `interrupt()` in the same call throws.
+- Only a run with `onInterrupt: "replay"` can wait. Anywhere else, `interrupt()` throws, so a Workspace with modules that interrupt should make `"replay"` its backend's default.
+- A run is released once each call in flight has finished or is waiting too, and those waits are answered together. A call the run makes after the first interrupt is held until it resumes, so a call that interrupts straight away can leave the next one to wait for a later round.
+- `respond()` throws `ENOTWAITING` for a call that isn't waiting, such as one already answered, so answering twice changes nothing.
+- Every answer replays the run from the top.
+
+### Limits
+
+- A run gets three attempts, counted again each time it journals a call, and has to finish within its original timeout, counted from when it first started.
+- A run only resumes on the same runtime. A new compatibility date or flags, or a new `maxStdioBytes` or `maxCapabilityBytes`, fails the runs it interrupted, and so does an upgrade of this package that changes how runs replay.
+- Interrupted runs restart four at a time, since a Durable Object can only run ten Dynamic Workers at once.
+- A replayable run's `fetch` is buffered rather than streamed, and each body has to fit in `maxCapabilityBytes` (1 MiB by default). Requests don't count toward `maxCapabilityCalls`, and at most six are open at once, with the rest waiting. A request in flight at the restart is sent again. Aborting a request stops the code waiting for it, but the host's request runs until it finishes.
+- Keys from `crypto.subtle.generateKey()`, `node:crypto` randomness, `node:timers` and `cloudflare:sockets` aren't replayed. A run that prints their results or passes them to a call fails on replay.
+- The journal uses Durable Object storage until the run settles: roughly the size of every response, plus the run's code.
 
 ## Environment, standard input, and the `process` shim
 
@@ -178,7 +306,7 @@ An import that is not built in, configured, one of the allowed Node.js modules, 
 
 The allowed Node.js modules are the ones that work entirely inside the isolate: `node:path`, `node:url`, `node:util`, `node:events`, `node:buffer`, `node:assert`, `node:string_decoder`, `node:querystring`, `node:stream`, `node:crypto`, `node:zlib`, `node:timers`, `node:async_hooks`, and `node:diagnostics_channel`, with their subpaths such as `node:path/posix` and `node:timers/promises`. The runtime provides them, and imports of them are left as written. A bare name such as `path` works too and becomes `node:path`, unless a configured module has that name, in which case the configured module wins. The runtime has more Node.js modules, but they either duplicate what the Workspace provides, as `node:fs` does, reach outside the isolate, or are stubs that throw when called, so they stay unavailable.
 
-Any import that is not a path is resolved by name. The Worker Loader has no `node_modules` lookup and resolves a bare import next to the importing file, so Workspace stores each source and host module once, in a `__modules__` directory of the Worker's bundle, and rewrites every import of one into a relative path to it. Every file that imports `lodash` gets the same instance, however many directories the code spans. An absolute import is rewritten the same way. Relative paths are the only form the Worker Loader's legacy and new module registries resolve alike, so imports work whether or not `compatibilityFlags` includes `new_module_registry`. When a module fails to link, the error names it as the code wrote it.
+Any import that is not a path is resolved by name. The Worker Loader has no `node_modules` lookup and resolves a bare import next to the importing file, so Workspace stores each source and host module once, in a `__modules__` directory of the Worker's bundle, and rewrites every import of one into a relative path to it. Every file that imports `lodash` gets the same instance, however many directories the code spans. An absolute import is rewritten the same way. Relative paths are the only form the Worker Loader's legacy and new module registries resolve alike, so imports work whether or not `compatibilityFlags` includes `new_module_registry`. The Workers runtime still treats `new_module_registry` as experimental, so a Worker that adds it also needs the `experimental` compatibility flag; the default settings need neither. When a module fails to link, the error names it as the code wrote it.
 
 The backend describes its modules for a model in `backend.description`, which `workspace.runtime.backends()` returns and the `exec` tool shows. It is built from the same `modules` option the backend runs with, so it always matches what is installed:
 

@@ -9,11 +9,15 @@
 // backend, etc.) can be tree-shaken when a consumer only uses
 // one of them:
 //
-//   import { LegacyContainerBackend } from "@cloudflare/computer/backends/container-legacy";
-//   import { WorkerShellBackend }         from "@cloudflare/computer/backends/worker-shell";
+//   import { ContainerBackend }   from "@cloudflare/computer/backends/container";
+//   import { WorkerShellBackend } from "@cloudflare/computer/backends/worker-shell";
 //
 // TestBackend stays on the main entry because it's a thin
 // test-only fake with no payload.
+//
+// Status: stable, except Workspace.push() and Workspace.pull(),
+// which drive the experimental sync with computerd. The package
+// README's status table is the canonical list.
 
 export type { SyncProgress } from "@cloudflare/computer-rpc/driver";
 export type {
@@ -27,12 +31,14 @@ export type { BackendHandle, WorkspaceBackend } from "./backend.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
 export {
   getWorkspace,
+  type LazyWorkspaceClient,
   type RuntimeExecOptions,
   type RuntimeGetOptions,
   type RuntimeKillOptions,
   type WorkspaceClient,
   type WorkspaceHandle,
   type WorkspaceRuntimeClient,
+  type WorkspaceSource,
 } from "./client.js";
 export { decodeExecEvents, encodeExecEvents } from "./exec-wire.js";
 export { R2Bucket, type R2BucketBinding, type R2BucketOptions } from "./mounts/providers/r2.js";
@@ -100,14 +106,17 @@ export type {
   WorkspaceRuntimeExecHandle,
   WorkspaceRuntimeExecOptions,
   WorkspaceRuntimeGetOptions,
+  WorkspaceRuntimeInterruptPolicy,
   WorkspaceRuntimeKillOptions,
   WorkspaceRuntimeLoader,
   WorkspaceRuntimeOutputOptions,
+  WorkspaceRuntimePendingCall,
   WorkspaceRuntimeResult,
   WorkspaceRuntimeStatus,
   WorkspaceRuntimeTruncation,
   WorkspaceRuntimeValue,
 } from "./runtime/types.js";
+export { unsafeToRepeat } from "./runtime/replay-safety.js";
 export { decodeRuntimeEvents, encodeRuntimeEvent } from "./runtime/wire.js";
 export { type RawShellValue, type ShellValue, sh, shellQuote } from "./sh.js";
 export type { ExecEncoding, ExecSyncResult, KillSignal } from "./shell.js";
@@ -125,9 +134,4 @@ export {
   type WorkspaceStubHost,
   withWorkspace,
 } from "./with-workspace.js";
-export {
-  type ThinkWorkspaceCompatibility,
-  Workspace,
-  type WorkspaceGitFactory,
-  type WorkspaceOptions,
-} from "./workspace.js";
+export { Workspace, type WorkspaceGitFactory, type WorkspaceOptions } from "./workspace.js";

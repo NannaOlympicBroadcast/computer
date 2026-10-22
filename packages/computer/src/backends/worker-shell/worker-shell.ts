@@ -20,6 +20,7 @@
 import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "@cloudflare/computer-rpc";
 
 import type { BackendHandle, WorkspaceBackend } from "../../backend.js";
+import { withHostName } from "../../durable-object-name.js";
 import type { WorkspaceServiceProxyProps } from "../../proxy.js";
 import { dynamicWorkerEgress, type WorkspaceEgressPolicy } from "../../runtime/egress.js";
 import { SHELL_RUNTIME_MODULES } from "./runtime-modules.js";
@@ -137,6 +138,12 @@ export interface WorkerShellBackendOptions {
 const DEFAULT_COMPAT_DATE = "2026-06-17";
 const DEFAULT_COMPAT_FLAGS = ["nodejs_compat"];
 
+/**
+ * Runs shell commands with just-bash in a Dynamic Worker.
+ *
+ * Experimental: this API may change in any release and is not yet
+ * suitable for production use.
+ */
 export class WorkerShellBackend implements WorkspaceBackend {
   readonly type = "worker-shell";
   /** What this backend tells a model: a fast shell with a fixed command set. */
@@ -248,7 +255,7 @@ export class WorkerShellBackend implements WorkspaceBackend {
         // The shell calls env.HOST.getWorkspace() on every exec;
         // the proxy resolves env[binding].get(id).getWorkspace()
         // on the host side.
-        HOST: ctx.exports.WorkspaceServiceProxy({ props: workspace }),
+        HOST: ctx.exports.WorkspaceServiceProxy({ props: withHostName(workspace, ctx) }),
       },
       ...dynamicWorkerEgress(this.#egress),
     }));

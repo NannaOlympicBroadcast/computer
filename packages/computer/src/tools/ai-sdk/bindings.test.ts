@@ -14,6 +14,8 @@ function callContext(): WorkspaceModuleCallContext {
     signal: new AbortController().signal,
     deadline: Date.now() + 60_000,
     access: "read-write",
+    callId: "test-call",
+    interrupt: () => Promise.reject(new Error("not used")),
     resolvePath: async (path) => path,
   };
 }

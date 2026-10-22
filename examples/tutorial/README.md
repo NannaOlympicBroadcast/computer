@@ -1,11 +1,11 @@
 # Tutorial: a PDF recipe card agent
 
 > [!IMPORTANT]
-> **PREVIEW ONLY** This package is provided as a preview for feedback only.
-> APIs are unstable and the design is subject to change.
->
-> Suitable for experiments, exploration and prototypes. It is NOT suitable
-> for production use at this time.
+> This example uses the deprecated legacy container backend and the
+> experimental `computerd`. New code should use `ContainerBackend`.
+> Their APIs may change in any release, and they are not yet suitable
+> for production use. See the
+> [status table](../../packages/computer/README.md#status).
 
 A worker with one endpoint. You post a dish, an agent finds a matching
 recipe on [openstove.org](https://openstove.org/recipes), writes a
@@ -16,7 +16,7 @@ with a link to the PDF.
 POST /prompt ──► RecipeAgent
                    │ fetch_url https://openstove.org/...      (host)
                    │ write     /workspace/card.md             (host)
-                   │ bash      pandoc card.md -o card.pdf     (container)
+                   │ exec      pandoc card.md -o card.pdf     (container)
                    ▼
                  R2 ──► signed link, good for a day
 ```
@@ -26,7 +26,7 @@ of the workspace. The `write` tool runs on the host, in the durable
 object, and writes through the `Workspace` into durable object storage.
 The container sees the same file on its FUSE mount at `/workspace`, so
 `pandoc` reads it as an ordinary file. The PDF `pandoc` writes syncs
-back the other way when the `bash` call finishes, so the finished file
+back the other way when the `exec` call finishes, so the finished file
 can be published straight from the workspace.
 
 The finished code is [one file](src/index.ts). The rest of this page
@@ -135,9 +135,8 @@ works in both places.
 ## 4. Give Think a Computer workspace
 
 The durable object owns a `LegacyContainerBackend`, which is the
-container the workspace is mounted in. The `Workspace` instance enables
-Computer's Think-compatible methods so Think's built-in tools use the
-same filesystem as the container.
+container the workspace is mounted in. Think's built-in tools work on
+that `Workspace`, so they use the same filesystem as the container.
 
 ```ts
 import {
@@ -145,10 +144,7 @@ import {
   withLegacyWorkspaceContainer,
 } from "@cloudflare/computer/backends/container-legacy";
 import { Think } from "@cloudflare/think";
-import {
-  type ThinkWorkspaceCompatibility,
-  Workspace,
-} from "@cloudflare/computer";
+import { Workspace } from "@cloudflare/computer";
 
 class RecipeBase extends Think<Env> {}
 
@@ -162,8 +158,7 @@ export class RecipeAgent extends withLegacyWorkspaceContainer(RecipeBase) {
   override workspace = new Workspace({
     storage: this.ctx.storage,
     backends: [this.#backend],
-    useThink: true,
-  }) as Workspace & ThinkWorkspaceCompatibility;
+  });
 
   override async fetch(request: Request): Promise<Response> {
     return new URL(request.url).pathname === "/api"
@@ -186,10 +181,10 @@ hand `/api` to the backend before the base class sees it.
 ## 5. Hook the workspace up to the agent
 
 Think already has file and shell tools. The Computer workspace makes
-those tools use the same filesystem as the container:
-`write` calls Computer's host-side filesystem, while `bash` calls the
-container shell. Think's fetch tool gets an allowlist of one host, so
-the agent can read openstove.org and nothing else.
+those tools use the same filesystem as the container: `write` calls
+Computer's host-side filesystem, while `exec` runs a command in the
+container. Think's fetch tool gets an allowlist of one host, so the
+agent can read openstove.org and nothing else.
 
 ```ts
 override maxSteps = 10;
@@ -216,13 +211,13 @@ override getSystemPrompt() {
     "   and numbered Method steps. End with the source page URL spelled out,",
     "   not a markdown link: the card gets printed, and a link prints as its",
     "   text alone.",
-    "3. Convert it with `bash`: `pandoc /workspace/card.md -o /workspace/card.pdf --pdf-engine=typst`.",
+    "3. Convert it with `exec`: `pandoc /workspace/card.md -o /workspace/card.pdf --pdf-engine=typst`.",
     "4. Reply with one sentence naming the recipe you picked.",
   ].join("\n");
 }
 ```
 
-Nothing copies files between `write` and `bash`: the write goes into
+Nothing copies files between `write` and `exec`: the write goes into
 durable object storage and the container reads it back out of the mount,
 and the PDF `pandoc` leaves behind travels the same road in reverse.
 
@@ -358,7 +353,7 @@ curl -X POST http://localhost:8787/prompt \
 ```
 
 The first request may be slow: the container has to boot before the
-first `bash` runs. The link points at R2 rather than at the worker, so
+first `exec` runs. The link points at R2 rather than at the worker, so
 it works the same whether the worker runs locally or deployed.
 
 `wrangler deploy` works against any account with Workers AI and

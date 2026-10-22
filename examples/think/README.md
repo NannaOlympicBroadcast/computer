@@ -1,11 +1,10 @@
 # `@cloudflare/think` chat example
 
 > [!IMPORTANT]
-> **PREVIEW ONLY** This package is provided as a preview for feedback only.
-> APIs are unstable and the design is subject to change.
->
-> Suitable for experiments, exploration and prototypes. It is NOT suitable
-> for production use at this time.
+> This example uses experimental parts of Cloudflare Computer: the container and Worker shell backends and `computerd`.
+> Their APIs may change in any release, and they are not yet suitable
+> for production use. See the
+> [status table](../../packages/computer/README.md#status).
 
 A minimal example that puts [`@cloudflare/think`][think] behind a
 terminal chat interface. The agent is a Durable Object with a
@@ -47,12 +46,12 @@ usage note. There is no other route.
 
 `src/agent.ts` is the whole agent. `Assistant` extends `Think`, which
 supplies the chat protocol, message persistence, resumable streams,
-and the agentic tool loop. The example adds three things: a Workers AI
-model, a Workspace, and the workspace tools.
+the agentic tool loop, and the workspace tools. The example adds two
+things: a Workers AI model and a Workspace.
 
 ## Tools
 
-The tools come from `createAITools()` in
+Think builds the tools with `createAITools()` from
 [`@cloudflare/computer/tools/ai-sdk`][tools]. This example offers the
 file tools and an `exec` tool over both backends, each of which
 describes itself to the model. It does not configure the assets
