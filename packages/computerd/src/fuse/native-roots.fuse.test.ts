@@ -14,7 +14,9 @@ import { accessSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createWorkspaceClient } from "@cloudflare/computer-rpc/client";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { WebSocket } from "ws";
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../../../..");
 const RUN_COMPUTERD_SCRIPT = join(REPO_ROOT, "packages/computer/test-harness/run-computerd.sh");
@@ -132,6 +134,38 @@ interface NativeInfo {
   active: number;
   mounts: number;
   failures: number;
+  transparentRemoval: boolean;
+  transparentRemovalReason: string;
+  removalDetaches: number;
+}
+
+/**
+ * Runs a command through computerd's exec RPC, as a host does. Unlike
+ * `sh`, the command is computerd's child, so the removal guard covers it.
+ */
+async function exec(
+  client: ReturnType<typeof createWorkspaceClient>,
+  source: string,
+): Promise<{ stdout: string; stderr: string; code: number | undefined }> {
+  const handle = await client.shell.exec({ source, cwd: "/workspace", timeoutMs: 30_000 });
+  const reader = handle.events.getReader();
+  let stdout = "";
+  let stderr = "";
+  let code: number | undefined;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const event = value as { name: string; value?: unknown; code?: number };
+      const text = () => new TextDecoder().decode(event.value as Uint8Array);
+      if (event.name === "stdout") stdout += text();
+      if (event.name === "stderr") stderr += text();
+      if (event.name === "exit") code = event.code;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return { stdout, stderr, code };
 }
 
 async function nativeInfo(booted: Booted): Promise<NativeInfo> {
@@ -151,14 +185,28 @@ async function stats(booted: Booted): Promise<{ localOps: number; vfsNodes: numb
 
 describeIfReal("native roots under a real mount", () => {
   let booted: Booted | undefined;
+  let client: ReturnType<typeof createWorkspaceClient> | undefined;
   let available = false;
 
   beforeAll(async () => {
     booted = await boot({ MOUNT_IGNORE: IGNORE });
     available = (await nativeInfo(booted)).enabled;
+    client = createWorkspaceClient({
+      url: `${booted.url.replace(/^http(s?):\/\//, "ws$1://")}/api`,
+      WebSocketImpl: WebSocket,
+    });
   }, 120_000);
 
-  afterAll(() => kill(booted));
+  afterAll(async () => {
+    await client?.close();
+    kill(booted);
+  });
+
+  const guarded = (ctx: { skip: () => void }) => {
+    const b = ready(ctx);
+    if (client === undefined) throw new Error("no exec client");
+    return { b, run: (source: string) => exec(client as NonNullable<typeof client>, source) };
+  };
 
   const ready = (ctx: { skip: () => void }): Booted => {
     if (booted === undefined) throw new Error("computerd container did not start");
@@ -258,7 +306,9 @@ describeIfReal("native roots under a real mount", () => {
     expect(all).not.toContain("/workspace/linked/node_modules");
   }, 30_000);
 
-  test("removing or renaming a root gets EBUSY until it is detached", async (ctx) => {
+  test("outside computerd's commands, removing or renaming a root gets EBUSY until detached", async (ctx) => {
+    // `docker exec` processes are not computerd's children, so the removal
+    // guard does not see their syscalls.
     const b = ready(ctx);
     sh(b, "mkdir -p busy/node_modules/react && echo 1 > busy/node_modules/react/index.js");
     expect(await waitForMount(b, "/workspace/busy/node_modules")).toBe(true);
@@ -303,6 +353,82 @@ describeIfReal("native roots under a real mount", () => {
     );
     const [mounted, backing] = identity.stdout.trim().split("\n");
     expect(mounted).toBe(backing);
+  }, 30_000);
+
+  test("the removal guard is on", async (ctx) => {
+    const b = ready(ctx);
+    const info = await nativeInfo(b);
+    expect(info.transparentRemoval).toBe(true);
+    expect(info.transparentRemovalReason).toBe("active");
+  });
+
+  test("rm -rf of a root works from a command computerd runs", async (ctx) => {
+    const { b, run } = guarded(ctx);
+    sh(b, "mkdir -p gone/node_modules/react && echo 1 > gone/node_modules/react/index.js");
+    expect(await waitForMount(b, "/workspace/gone/node_modules")).toBe(true);
+    const before = (await nativeInfo(b)).removalDetaches;
+    const result = await run("rm -rf gone/node_modules && echo removed");
+    expect(result).toMatchObject({ code: 0, stdout: "removed\n" });
+    expect(mounts(b)).not.toContain("/workspace/gone/node_modules");
+    expect(
+      sh(b, "test ! -e gone/node_modules && test ! -e /tmp/workspace/gone/node_modules").code,
+    ).toBe(0);
+    expect((await nativeInfo(b)).removalDetaches).toBe(before + 1);
+    // And it comes back mounted when created again.
+    await run("mkdir gone/node_modules");
+    expect(await waitForMount(b, "/workspace/gone/node_modules")).toBe(true);
+  }, 30_000);
+
+  test("rm -rf of a directory holding roots works", async (ctx) => {
+    const { b, run } = guarded(ctx);
+    sh(b, "mkdir -p tree/a/node_modules/x tree/b/node_modules && echo 1 > tree/src.ts");
+    expect(await waitForMount(b, "/workspace/tree/a/node_modules")).toBe(true);
+    expect(await waitForMount(b, "/workspace/tree/b/node_modules")).toBe(true);
+    const result = await run("rm -rf tree && echo removed");
+    expect(result).toMatchObject({ code: 0, stdout: "removed\n" });
+    expect(sh(b, "test ! -e tree && test ! -e /tmp/workspace/tree").code).toBe(0);
+  }, 30_000);
+
+  test("a program calling rmdir(2) itself, not rm, works", async (ctx) => {
+    const { b, run } = guarded(ctx);
+    sh(b, "mkdir -p direct/node_modules");
+    expect(await waitForMount(b, "/workspace/direct/node_modules")).toBe(true);
+    const result = await run(`perl -e 'rmdir "direct/node_modules" or die "$!\\n"; print "ok\\n"'`);
+    expect(result).toMatchObject({ code: 0, stdout: "ok\n" });
+    expect(sh(b, "test ! -e direct/node_modules").code).toBe(0);
+  }, 30_000);
+
+  test("mv of a root crosses the boundary as without a mount: EXDEV, then a copy", async (ctx) => {
+    const { b, run } = guarded(ctx);
+    sh(b, "mkdir -p moved/node_modules && echo 1 > moved/node_modules/f");
+    expect(await waitForMount(b, "/workspace/moved/node_modules")).toBe(true);
+    const renamed = await run(`perl -e 'rename "moved/node_modules", "moved/nm" or print "$!\\n"'`);
+    expect(renamed.stdout).toMatch(/cross-device/i);
+    const result = await run("mv moved/node_modules moved/elsewhere && cat moved/elsewhere/f");
+    expect(result).toMatchObject({ code: 0, stdout: "1\n" });
+    expect(sh(b, "test ! -e moved/node_modules").code).toBe(0);
+  }, 30_000);
+
+  test("a background process outliving its command can still remove a root", async (ctx) => {
+    const { b, run } = guarded(ctx);
+    sh(b, "rm -f /tmp/bg-status; mkdir -p bg/node_modules/x");
+    expect(await waitForMount(b, "/workspace/bg/node_modules")).toBe(true);
+    const started = await run(
+      "(sleep 1; rm -rf bg/node_modules; echo $? > /tmp/bg-status) > /dev/null 2>&1 < /dev/null &",
+    );
+    expect(started.code).toBe(0);
+    await new Promise((r) => setTimeout(r, 2_500));
+    expect(sh(b, "cat /tmp/bg-status").stdout).toBe("0\n");
+    expect(sh(b, "test ! -e bg/node_modules").code).toBe(0);
+  }, 30_000);
+
+  test("ordinary removals and renames are untouched", async (ctx) => {
+    const { run } = guarded(ctx);
+    const result = await run(
+      "mkdir -p plain/a/b && echo x > plain/a/f && mv plain/a plain/c && rmdir plain/c/b && " +
+        "rm plain/c/f && rmdir plain/c && rmdir plain && echo ok",
+    );
+    expect(result).toMatchObject({ code: 0, stdout: "ok\n" });
   }, 30_000);
 
   test("info and stats report the mounts", async (ctx) => {
