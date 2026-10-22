@@ -16,7 +16,7 @@ the FUSE addon are baked in. libfuse is not: the binary links the
 system's libfuse 3 and needs 3.17 or newer, which is the `fuse3` package
 on Debian trixie or later. The host also needs `/dev/fuse`, and Linux
 6.9 or newer for local-only paths to use FUSE passthrough. computerd
-0.4.1 and earlier linked libfuse 2 instead and also need `libfuse2t64`.
+0.6.0 and earlier link libfuse 2 instead and also need `libfuse2t64`.
 
 This package is private and is not published to npm. The release workflow
 builds the binary, stages it into `bin/computerd`, and publishes the image
@@ -25,9 +25,12 @@ instead:
 ```dockerfile
 FROM ghcr.io/cloudflare/computer-computerd-linux-x64:0.6.0 AS computerd
 FROM debian:trixie-slim
+# libfuse2t64 is for the pinned binary while that tag is 0.6.0 or earlier,
+# which link libfuse 2. Later releases need only fuse3, at libfuse 3.17
+# or newer (Debian trixie); drop libfuse2t64 once the tag is past 0.6.0.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      fuse3 ca-certificates \
+      fuse3 libfuse2t64 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=computerd /usr/local/bin/computerd /usr/local/bin/computerd

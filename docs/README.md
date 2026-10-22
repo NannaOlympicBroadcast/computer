@@ -76,9 +76,12 @@ FROM ghcr.io/cloudflare/computer-computerd-linux-x64:0.6.0 AS computerd
 
 FROM debian:trixie-slim
 
+# libfuse2t64 is for the pinned binary while that tag is 0.6.0 or earlier,
+# which link libfuse 2. Later releases need only fuse3, at libfuse 3.17
+# or newer (Debian trixie); drop libfuse2t64 once the tag is past 0.6.0.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      fuse3 ca-certificates \
+      fuse3 libfuse2t64 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=computerd /usr/local/bin/computerd /usr/local/bin/computerd
@@ -92,8 +95,9 @@ ENTRYPOINT ["/usr/local/bin/computerd"]
 ```
 
 `fuse3` brings libfuse 3, which computerd links and needs at 3.17 or
-newer, so the base has to be Debian trixie or later. computerd 0.4.1 and
-earlier linked libfuse 2 instead and also need `libfuse2t64`.
+newer, so the base has to be Debian trixie or later. computerd 0.6.0 and
+earlier link libfuse 2 instead and also need `libfuse2t64`, which is why
+the snippet installs it while it pins one of those.
 
 To build the binary from source instead, run `npm run build:bin
 --workspace @cloudflare/computerd`, which emits
