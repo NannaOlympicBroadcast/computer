@@ -20,6 +20,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 BINARY="${COMPUTERD_BINARY:-$ROOT/artifacts/computerd/computerd-linux-x64}"
 HOST_PORT="${COMPUTERD_HARNESS_PORT:-0}"
+# linux/arm64 runs an arm64 binary (COMPUTERD_BINARY) natively on an arm64
+# host instead of under emulation.
+PLATFORM="${COMPUTERD_HARNESS_PLATFORM:-linux/amd64}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker not found in PATH" >&2
@@ -35,11 +38,13 @@ fi
 # Pre-pull the FUSE runtime once by using our own intermediate
 # image. Skipped if the image already exists. computerd links the
 # system libfuse 3 and needs 3.17 or newer, which is Debian trixie.
-IMAGE_TAG="computerd-harness:libfuse3"
-if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+# COMPUTERD_HARNESS_IMAGE boots a prepared image instead, such as one
+# committed from a running container to stand in for a snapshot restore.
+IMAGE_TAG="${COMPUTERD_HARNESS_IMAGE:-computerd-harness:libfuse3-${PLATFORM//\//-}}"
+if [[ -z "${COMPUTERD_HARNESS_IMAGE:-}" ]] && ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
   echo "building $IMAGE_TAG..." >&2
-  docker build --platform linux/amd64 -t "$IMAGE_TAG" - <<'DOCKERFILE' >&2
-FROM --platform=linux/amd64 debian:trixie-slim
+  docker build --platform "$PLATFORM" -t "$IMAGE_TAG" - <<'DOCKERFILE' >&2
+FROM debian:trixie-slim
 RUN apt-get update >/dev/null \
  && apt-get install -y --no-install-recommends \
       fuse3 attr util-linux coreutils findutils \
@@ -48,11 +53,12 @@ RUN apt-get update >/dev/null \
 DOCKERFILE
 fi
 
-# Lets a test boot computerd with MOUNT_IGNORE or COMPUTERD_FUSE_* set.
+# Lets a test boot computerd with MOUNT_IGNORE, MOUNT_NATIVE, COMPUTERD_DB, or
+# COMPUTERD_FUSE_* set.
 FORWARD_ENV=()
 while IFS='=' read -r name _; do
   case "$name" in
-    MOUNT_IGNORE | MOUNT_IGNORE_PATH | COMPUTERD_FUSE_*) FORWARD_ENV+=(-e "$name") ;;
+    MOUNT_IGNORE | MOUNT_IGNORE_PATH | MOUNT_NATIVE | COMPUTERD_DB | COMPUTERD_FUSE_*) FORWARD_ENV+=(-e "$name") ;;
   esac
 done < <(env)
 
@@ -60,7 +66,7 @@ done < <(env)
 # the same recipe as script/fs-tests.sh; lets the FUSE binding
 # actually mount.
 CID=$(docker run --rm -d \
-  --platform linux/amd64 \
+  --platform "$PLATFORM" \
   --privileged \
   --device /dev/fuse \
   --cap-add SYS_ADMIN --cap-add MKNOD \
