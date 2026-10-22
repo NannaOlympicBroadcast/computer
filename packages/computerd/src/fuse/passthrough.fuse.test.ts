@@ -51,6 +51,9 @@ describeIfReal("FUSE passthrough under a real mount", () => {
         ...process.env,
         COMPUTERD_HARNESS_PORT: "0",
         MOUNT_IGNORE: "/node_modules",
+        // Passthrough on its own: a native root would serve these files
+        // without the daemon opening them at all.
+        COMPUTERD_FUSE_NATIVE_ROOTS: "0",
         COMPUTERD_FUSE_TRACE: "summary",
         COMPUTERD_FUSE_TRACE_FILE: TRACE_FILE,
       },

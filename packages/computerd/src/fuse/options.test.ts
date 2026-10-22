@@ -4,6 +4,7 @@ import {
   buildFuseInitConfig,
   buildFuseMountOptions,
   type FuseOptionEnv,
+  nativeRootsRequested,
   passthroughRequested,
 } from "./options.js";
 
@@ -166,6 +167,18 @@ describe("passthroughRequested", () => {
   test("stays on for anything else, so a typo cannot quietly cost speed", () => {
     for (const value of ["1", "true", "yes", "on", ""]) {
       expect(passthroughRequested({ COMPUTERD_FUSE_PASSTHROUGH: value })).toBe(true);
+    }
+  });
+});
+
+describe("nativeRootsRequested", () => {
+  test("is on by default and turns off with the same spellings as passthrough", () => {
+    expect(nativeRootsRequested(empty)).toBe(true);
+    for (const value of ["0", "false", "no", "off", " OFF "]) {
+      expect(nativeRootsRequested({ COMPUTERD_FUSE_NATIVE_ROOTS: value })).toBe(false);
+    }
+    for (const value of ["1", "true", ""]) {
+      expect(nativeRootsRequested({ COMPUTERD_FUSE_NATIVE_ROOTS: value })).toBe(true);
     }
   });
 });

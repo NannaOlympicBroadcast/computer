@@ -31,12 +31,6 @@ export class MountIgnorePathError extends Error {
 export interface MountIgnoreSet {
   /** Whether a mount-relative path is local-only. Never touches disk. */
   readonly ignores: (relativePath: string) => boolean;
-  /**
-   * Whether the last pattern matching exactly this path, not a directory
-   * above it, is an inclusion. `ignores` answers "is this path local?";
-   * this answers "is this the path a pattern names?".
-   */
-  readonly matches: (relativePath: string) => boolean;
   /** Normalized patterns, in the order written. Order matters. */
   readonly patterns: readonly string[];
   /** Exclusions under a local-only directory, which therefore do nothing. */
@@ -105,21 +99,8 @@ export function resolveMountIgnore(entries: readonly string[], mountPoint = "/")
     return false;
   };
 
-  const matches = (relativePath: string): boolean => {
-    if (isEmpty) return false;
-    const path = stripSlashes(relativePath);
-    if (path === "") return false;
-    const segments = path.split("/");
-    let matched = false;
-    for (const pattern of compiled) {
-      if (matchSegments(pattern.segments, 0, segments, 0)) matched = !pattern.exclude;
-    }
-    return matched;
-  };
-
   return {
     ignores,
-    matches,
     isEmpty,
     patterns: compiled.map((pattern) => pattern.source),
     ineffectiveExclusions: compiled

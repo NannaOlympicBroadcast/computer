@@ -167,32 +167,6 @@ describe("resolveMountIgnore: exclusions", () => {
   });
 });
 
-describe("resolveMountIgnore: matches", () => {
-  test("is true only for the path a pattern names, not what lies under it", () => {
-    const ignore = set(["**/node_modules", "/dist"]);
-    expect(ignore.matches("node_modules")).toBe(true);
-    expect(ignore.matches("app/node_modules")).toBe(true);
-    expect(ignore.matches("dist")).toBe(true);
-    expect(ignore.matches("node_modules/react")).toBe(false);
-    expect(ignore.matches("dist/main.js")).toBe(false);
-    expect(ignore.matches("src")).toBe(false);
-    expect(ignore.matches("")).toBe(false);
-  });
-
-  test("the last matching pattern wins, as for ignores", () => {
-    const ignore = set(["**/node_modules", "!/vendor/node_modules"]);
-    expect(ignore.matches("vendor/node_modules")).toBe(false);
-    expect(ignore.matches("app/node_modules")).toBe(true);
-  });
-
-  test("a nested match under a matched directory still matches", () => {
-    // matches() looks at one path; whether an ancestor is local is
-    // ignores()' question.
-    const ignore = set(["**/node_modules"]);
-    expect(ignore.matches("node_modules/a/node_modules")).toBe(true);
-  });
-});
-
 describe("resolveMountIgnore: normalization", () => {
   test("keeps patterns in the order written", () => {
     // Order changes the meaning once exclusions are involved.

@@ -31,6 +31,7 @@ export interface FuseOptionEnv {
   COMPUTERD_FUSE_NEGATIVE_TIMEOUT?: string;
   COMPUTERD_FUSE_EXTRA_OPTS?: string;
   COMPUTERD_FUSE_PASSTHROUGH?: string;
+  COMPUTERD_FUSE_NATIVE_ROOTS?: string;
 }
 
 type OptionValue = boolean | number | string;
@@ -65,8 +66,21 @@ export function buildFuseMountOptions(env: FuseOptionEnv): FuseMountOptions {
 }
 
 export function passthroughRequested(env: FuseOptionEnv): boolean {
-  const value = env.COMPUTERD_FUSE_PASSTHROUGH?.trim().toLowerCase();
-  return !(value === "0" || value === "false" || value === "no" || value === "off");
+  return !isOff(env.COMPUTERD_FUSE_PASSTHROUGH);
+}
+
+/**
+ * Native roots are on by default wherever MOUNT_IGNORE is set;
+ * COMPUTERD_FUSE_NATIVE_ROOTS=0 turns them off, for ruling them in or out
+ * while chasing a problem.
+ */
+export function nativeRootsRequested(env: FuseOptionEnv): boolean {
+  return !isOff(env.COMPUTERD_FUSE_NATIVE_ROOTS);
+}
+
+function isOff(raw: string | undefined): boolean {
+  const value = raw?.trim().toLowerCase();
+  return value === "0" || value === "false" || value === "no" || value === "off";
 }
 
 // An unset variable keeps the default and an empty one turns the option off.

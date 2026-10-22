@@ -24,8 +24,8 @@
 #                   /tmp/workspace/ignored local-only (MOUNT_IGNORE)
 #   COMPUTERD_FUSE_PASSTHROUGH  set to 0 to measure local-only paths
 #                   without kernel passthrough
-#   NATIVE_ROOTS    set to 1, with IGNORE_NODE_MODULES=1, to bind-mount
-#                   those node_modules as native roots (MOUNT_NATIVE)
+#   COMPUTERD_FUSE_NATIVE_ROOTS  set to 0 to serve those node_modules
+#                   through FUSE passthrough instead of bind-mounting them
 #   PLATFORM        docker platform (default: linux/amd64). On an arm64
 #                   machine use linux/arm64 and a computerd-linux-arm64
 #                   binary; emulated timings are not meaningful.
@@ -50,7 +50,7 @@ FUSE_TRACE="${FUSE_TRACE:-}"
 TARGETS="${TARGETS:-native:/tmp/baseline,fuse:/tmp/workspace}"
 IGNORE_NODE_MODULES="${IGNORE_NODE_MODULES:-0}"
 COMPUTERD_FUSE_PASSTHROUGH="${COMPUTERD_FUSE_PASSTHROUGH:-}"
-NATIVE_ROOTS="${NATIVE_ROOTS:-0}"
+COMPUTERD_FUSE_NATIVE_ROOTS="${COMPUTERD_FUSE_NATIVE_ROOTS:-}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
 if [ ! -f "$COMPUTERD_BINARY" ]; then
@@ -75,5 +75,5 @@ docker run --rm --platform "$PLATFORM" --privileged \
   -e "TARGETS=$TARGETS" \
   -e "IGNORE_NODE_MODULES=$IGNORE_NODE_MODULES" \
   -e "COMPUTERD_FUSE_PASSTHROUGH=$COMPUTERD_FUSE_PASSTHROUGH" \
-  -e "NATIVE_ROOTS=$NATIVE_ROOTS" \
+  -e "COMPUTERD_FUSE_NATIVE_ROOTS=$COMPUTERD_FUSE_NATIVE_ROOTS" \
   debian:stable-slim bash /run-bench.sh

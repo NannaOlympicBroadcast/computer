@@ -21,7 +21,6 @@ interface Harness {
 function harness(
   options: {
     ignore?: string[];
-    native?: string[];
     dirs?: string[];
     files?: string[];
     symlinks?: string[];
@@ -33,7 +32,6 @@ function harness(
   } = {},
 ): Harness {
   const ignore = resolveMountIgnore(options.ignore ?? ["**/node_modules", "/dist"], MOUNT);
-  const native = resolveMountIgnore(options.native ?? ["**/node_modules"], "/");
   const dirs = new Set(options.dirs ?? []);
   const files = new Set(options.files ?? []);
   const symlinks = new Set(options.symlinks ?? []);
@@ -94,7 +92,6 @@ function harness(
     root: ROOT,
     mountPoint: MOUNT,
     ignore,
-    native: native.matches,
     ...(options.active ? { active: options.active } : {}),
     ...seams,
   });
@@ -102,7 +99,7 @@ function harness(
 }
 
 describe("isRoot", () => {
-  test("is the topmost local-only directory a MOUNT_NATIVE pattern names", () => {
+  test("is a local-only directory whose parent is synced", () => {
     const { roots } = harness();
     expect(roots.isRoot("node_modules")).toBe(true);
     expect(roots.isRoot("packages/app/node_modules")).toBe(true);
@@ -117,9 +114,10 @@ describe("isRoot", () => {
     expect(roots.isRoot("")).toBe(false);
   });
 
-  test("is false for a local-only path that MOUNT_NATIVE does not name", () => {
+  test("is any local-only pattern's directory, not only node_modules", () => {
     const { roots } = harness();
-    expect(roots.isRoot("dist")).toBe(false);
+    expect(roots.isRoot("dist")).toBe(true);
+    expect(roots.isRoot("dist/assets")).toBe(false);
   });
 
   test("respects an exclusion that keeps a path synced", () => {
@@ -143,8 +141,8 @@ describe("ensure", () => {
   });
 
   test("ignores paths that are not native roots", async () => {
-    const { roots, commands } = harness({ dirs: ["src", "dist", "node_modules/react"] });
-    for (const path of ["src", "dist", "node_modules/react"]) roots.ensure(path);
+    const { roots, commands } = harness({ dirs: ["src", "dist/assets", "node_modules/react"] });
+    for (const path of ["src", "dist/assets", "node_modules/react"]) roots.ensure(path);
     await roots.settled();
     expect(commands).toEqual([]);
   });
@@ -269,7 +267,6 @@ describe("scan", () => {
       root: ROOT,
       mountPoint: MOUNT,
       ignore: resolveMountIgnore(["**/node_modules", "/dist"], MOUNT),
-      native: resolveMountIgnore(["**/node_modules"], "/").matches,
       run: async (argv) => {
         h.commands.push([...argv]);
         return 0;
@@ -293,8 +290,12 @@ describe("scan", () => {
     roots.scan();
     await roots.settled();
     const bound = h.commands.filter((argv) => argv[1] === "--bind").map((argv) => argv[3]);
-    expect(bound.sort()).toEqual([`${MOUNT}/node_modules`, `${MOUNT}/packages/a/node_modules`]);
-    // Never inside a root, and never inside another local-only directory.
+    expect(bound.sort()).toEqual([
+      `${MOUNT}/dist`,
+      `${MOUNT}/node_modules`,
+      `${MOUNT}/packages/a/node_modules`,
+    ]);
+    // Never inside a root.
     expect(readdirs.some((path) => path.includes("node_modules"))).toBe(false);
     expect(readdirs.some((path) => path.includes("dist"))).toBe(false);
   });
@@ -336,7 +337,6 @@ describe("parking", () => {
       root: ROOT,
       mountPoint: MOUNT,
       ignore: resolveMountIgnore(["**/node_modules"], MOUNT),
-      native: resolveMountIgnore(["**/node_modules"], "/").matches,
       run: async (argv) => (argv[1] === "--bind" ? 32 : 0),
       mountinfo: () => "",
       lstat: () => ({ isDirectory: () => true, dev: 1, ino: 1 }),

@@ -2,20 +2,20 @@ export type { FUSEBackend, FuseMountMode, ResolveFuseBackendOptions } from "./ba
 export { parseFuseMountMode, resolveFuseBackend } from "./backend.js";
 export type { FuseMount, FuseOps, FuseStat } from "./driver.js";
 export { makeFUSEOps, mountFuse } from "./driver.js";
+export { nativeRootsRequested, passthroughRequested } from "./options.js";
 export type { MountIgnoreSet } from "./ignore.js";
 export { MountIgnorePathError, parseMountIgnore, resolveMountIgnore } from "./ignore.js";
 export type {
   MountIgnoreConfig,
   MountIgnoreEnv,
   MountIgnoreInfo,
-  NativeRootsConfig,
   NativeRootsInfo,
+  NativeRootsStatus,
   PassthroughStatus,
 } from "./ignore-config.js";
 export {
   defaultIgnoreRoot,
   describeMountIgnore,
-  MountNativeError,
   resolveMountIgnoreConfig,
 } from "./ignore-config.js";
 export type { NativeRoots, NativeRootsOptions, NativeRootsStats } from "./native-roots.js";

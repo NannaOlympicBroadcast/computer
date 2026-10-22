@@ -7,12 +7,7 @@
 
 import { isAbsolute, join, resolve } from "node:path";
 
-import {
-  MountIgnorePathError,
-  type MountIgnoreSet,
-  parseMountIgnore,
-  resolveMountIgnore,
-} from "./ignore.js";
+import { type MountIgnoreSet, parseMountIgnore, resolveMountIgnore } from "./ignore.js";
 
 export interface MountIgnoreConfig {
   /** Where local-only paths are stored. Absolute, outside the mount. */
@@ -21,30 +16,11 @@ export interface MountIgnoreConfig {
   readonly ignore: MountIgnoreSet;
   /** True when at least one path is configured. */
   readonly enabled: boolean;
-  /** Local-only directories to bind-mount from `root` (MOUNT_NATIVE). */
-  readonly native: NativeRootsConfig;
-}
-
-export interface NativeRootsConfig {
-  /** Normalized MOUNT_NATIVE patterns, in the order written. */
-  readonly patterns: readonly string[];
-  /** True when at least one pattern is configured. */
-  readonly enabled: boolean;
-  /** Whether a mount-relative path is one a MOUNT_NATIVE pattern names. */
-  readonly matches: (relativePath: string) => boolean;
 }
 
 export interface MountIgnoreEnv {
   MOUNT_IGNORE?: string;
   MOUNT_IGNORE_PATH?: string;
-  MOUNT_NATIVE?: string;
-}
-
-export class MountNativeError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "MountNativeError";
-  }
 }
 
 /**
@@ -90,50 +66,7 @@ export function resolveMountIgnoreConfig(
     throw new Error("MOUNT_IGNORE_PATH must not be the filesystem root");
   }
 
-  const native = resolveNativeRoots(env.MOUNT_NATIVE, ignore, mountPoint);
-  return { root: normalizedRoot, ignore, enabled: !ignore.isEmpty, native };
-}
-
-/**
- * MOUNT_NATIVE names a subset of MOUNT_IGNORE. Each entry must be written
- * as one of the MOUNT_IGNORE inclusions (after the same normalization),
- * so a native root is always a path that is already local-only and the
- * bind mount changes how it is served, never whether it is synced.
- */
-export function resolveNativeRoots(
-  raw: string | undefined,
-  ignore: MountIgnoreSet,
-  mountPoint: string,
-): NativeRootsConfig {
-  const entries = parseMountIgnore(raw);
-  const patterns: string[] = [];
-  for (const entry of entries) {
-    if (entry.startsWith("!")) {
-      throw new MountNativeError(
-        `MOUNT_NATIVE pattern ${JSON.stringify(entry)} is an exclusion. MOUNT_NATIVE lists ` +
-          `local-only directories to mount; keep exclusions in MOUNT_IGNORE.`,
-      );
-    }
-    let normalized: string;
-    try {
-      normalized = resolveMountIgnore([entry], mountPoint).patterns[0] as string;
-    } catch (error) {
-      if (error instanceof MountIgnorePathError) {
-        throw new MountNativeError(error.message.replace(/^MOUNT_IGNORE/, "MOUNT_NATIVE"));
-      }
-      throw error;
-    }
-    if (!ignore.patterns.includes(normalized)) {
-      throw new MountNativeError(
-        `MOUNT_NATIVE pattern ${JSON.stringify(entry)} is not in MOUNT_IGNORE. Only ` +
-          `local-only paths can be mounted natively; add ${JSON.stringify(normalized)} ` +
-          `to MOUNT_IGNORE as well.`,
-      );
-    }
-    patterns.push(normalized);
-  }
-  const set = resolveMountIgnore(patterns, "/");
-  return { patterns, enabled: patterns.length > 0, matches: set.matches };
+  return { root: normalizedRoot, ignore, enabled: !ignore.isEmpty };
 }
 
 export interface PassthroughStatus {
@@ -164,8 +97,13 @@ export interface MountIgnoreInfo {
   };
 }
 
-/** Counters from the native-roots module, as `describeMountIgnore` reads them. */
-export interface NativeRootsCounters {
+/**
+ * Native-root state as `describeMountIgnore` reads it. Undefined when no
+ * kernel FUSE mount is running.
+ */
+export interface NativeRootsStatus {
+  /** COMPUTERD_FUSE_NATIVE_ROOTS did not turn them off. */
+  readonly requested: boolean;
   readonly active: number;
   readonly mounts: number;
   readonly failures: number;
@@ -174,10 +112,9 @@ export interface NativeRootsCounters {
 }
 
 export interface NativeRootsInfo {
-  /** True when native roots are being mounted. */
+  /** True when local-only directories are being bind-mounted. */
   readonly enabled: boolean;
   readonly reason: string;
-  readonly patterns: readonly string[];
   readonly active: number;
   readonly mounts: number;
   readonly failures: number;
@@ -188,10 +125,10 @@ export interface NativeRootsInfo {
 export function describeMountIgnore(
   config: MountIgnoreConfig,
   status?: PassthroughStatus,
-  native?: NativeRootsCounters,
+  native?: NativeRootsStatus,
 ): MountIgnoreInfo {
   const inactive = inactivePassthroughReason(config, status);
-  const nativeInactive = inactiveNativeRootsReason(config, status);
+  const nativeInactive = inactiveNativeRootsReason(config, status, native);
   return {
     supported: true,
     enabled: config.enabled,
@@ -207,7 +144,6 @@ export function describeMountIgnore(
       nativeRoots: {
         enabled: nativeInactive === undefined,
         reason: nativeInactive ?? nativeActiveReason(native),
-        patterns: config.native.patterns,
         active: native?.active ?? 0,
         mounts: native?.mounts ?? 0,
         failures: native?.failures ?? 0,
@@ -223,9 +159,11 @@ export function describeMountIgnore(
 function inactiveNativeRootsReason(
   config: MountIgnoreConfig,
   status: PassthroughStatus | undefined,
+  native: NativeRootsStatus | undefined,
 ): string | undefined {
-  if (!config.native.enabled) return "no native roots are configured (MOUNT_NATIVE)";
-  if (status === undefined) return "no kernel FUSE mount is running";
+  if (!config.enabled) return "no local-only paths are configured (MOUNT_IGNORE)";
+  if (status === undefined || native === undefined) return "no kernel FUSE mount is running";
+  if (!native.requested) return "turned off with COMPUTERD_FUSE_NATIVE_ROOTS";
   if (!status.requested) {
     return "FUSE passthrough is turned off with COMPUTERD_FUSE_PASSTHROUGH, and native roots need it";
   }
@@ -235,7 +173,7 @@ function inactiveNativeRootsReason(
   return undefined;
 }
 
-function nativeActiveReason(native: NativeRootsCounters | undefined): string {
+function nativeActiveReason(native: NativeRootsStatus | undefined): string {
   if (native === undefined || native.failures === 0) return "active";
   if (native.mounts === 0) {
     return (

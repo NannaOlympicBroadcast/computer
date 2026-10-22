@@ -1,5 +1,5 @@
 // Native roots: bind-mounts local-only directories onto the mount. See
-// packages/computerd/README.md#native-roots-mount_native.
+// packages/computerd/README.md#native-roots.
 //
 // The local-only layer in passthrough.ts already stores each local-only
 // path at MOUNT_IGNORE_PATH/<rel> and serves it through FUSE. A native
@@ -40,8 +40,6 @@ export interface NativeRootsOptions {
   readonly mountPoint: string;
   /** The decided ignore set. */
   readonly ignore: MountIgnoreSet;
-  /** Whether a mount-relative path is named by a MOUNT_NATIVE pattern. */
-  readonly native: (relativePath: string) => boolean;
   /**
    * Checked on every `ensure`. Lets the daemon build this before the
    * FUSE mount exists and switch it on once passthrough is negotiated.
@@ -91,7 +89,7 @@ export interface NativeRoots {
   detach(relativePath?: string): Promise<string[]>;
   /** Lazily detach everything, at startup and shutdown. Parks nothing. */
   detachAll(): Promise<string[]>;
-  /** Whether `rel` is a native root: the topmost local-only directory named by MOUNT_NATIVE. */
+  /** Whether `rel` is a native root: a local-only directory whose parent is synced. */
   isRoot(relativePath: string): boolean;
   stats(): NativeRootsStats;
 }
@@ -124,9 +122,7 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
   const isRoot = (relativePath: string): boolean => {
     const rel = stripSlashes(relativePath);
     if (rel === "") return false;
-    return (
-      options.ignore.ignores(rel) && !options.ignore.ignores(parentOf(rel)) && options.native(rel)
-    );
+    return options.ignore.ignores(rel) && !options.ignore.ignores(parentOf(rel));
   };
 
   // Everything strictly under the mount point. The FUSE mount itself sits

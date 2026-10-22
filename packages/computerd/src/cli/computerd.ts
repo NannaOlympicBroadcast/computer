@@ -22,6 +22,7 @@ import {
   type MountIgnoreInfo,
   mountFuse,
   type NativeRoots,
+  nativeRootsRequested,
   parseFuseMountMode,
   parseStoreMode,
   type ResolvedStore,
@@ -150,6 +151,14 @@ function dropHeartbeats(stream: ReadableStream<ComputerdExecEvent>): ReadableStr
     }),
   );
 }
+
+const NO_NATIVE_ROOT_STATS = {
+  active: 0,
+  mounts: 0,
+  failures: 0,
+  detaches: 0,
+  lastFailure: undefined,
+} as const;
 
 interface ComputerdInfo {
   backend: FUSEBackend;
@@ -737,30 +746,34 @@ async function main(): Promise<void> {
     store,
     // A getter, so each request reports live passthrough state.
     get ignore() {
+      const passthrough = fuse?.getPassthroughStatus?.();
       return describeMountIgnore(
         ignoreConfig,
-        fuse?.getPassthroughStatus?.(),
-        nativeRoots?.stats(),
+        passthrough,
+        passthrough === undefined
+          ? undefined
+          : {
+              requested: nativeRootsWanted,
+              ...(nativeRoots?.stats() ?? NO_NATIVE_ROOT_STATS),
+            },
       );
     },
   };
 
-  // Native roots (MOUNT_NATIVE). Built before the mount so the passthrough
-  // layer can call into it, and switched on only once the kernel has
-  // negotiated FUSE passthrough: `active` is read on every call.
+  // Native roots: every local-only directory is bind-mounted from where
+  // it is stored. Built before the mount so the passthrough layer can call
+  // into it, and switched on only once the kernel has negotiated FUSE
+  // passthrough: `active` is read on every call.
+  const nativeRootsWanted = nativeRootsRequested(process.env);
   const nativeRoots: NativeRoots | undefined =
-    ignoreConfig.native.enabled && backend.kind !== "none" && backend.kind !== "shim"
+    ignoreConfig.enabled && nativeRootsWanted && backend.kind !== "none" && backend.kind !== "shim"
       ? createNativeRoots({
           root: ignoreConfig.root,
           mountPoint,
           ignore: ignoreConfig.ignore,
-          native: ignoreConfig.native.matches,
           active: () => fuse?.getPassthroughStatus?.().negotiated === true,
         })
       : undefined;
-  if (nativeRoots !== undefined) {
-    console.log(`[info] MOUNT_NATIVE active: ${ignoreConfig.native.patterns.join(", ")}`);
-  }
 
   // When running on the userspace shim, capture the typed handle
   // so we can wire `flush()` and `reconcileNow()` into the SyncRPC

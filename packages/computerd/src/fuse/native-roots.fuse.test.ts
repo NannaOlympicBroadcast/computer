@@ -1,5 +1,5 @@
 // Boots the binary in a privileged container, as passthrough.fuse.test.ts
-// does, with MOUNT_NATIVE set, and checks the kernel's view directly:
+// does, with MOUNT_IGNORE set, and checks the kernel's view directly:
 // `docker exec` runs in the container's mount namespace, so mountinfo and
 // every path it touches are what a command sees. Skips without Docker or
 // the binary, and skips the cases that need native roots on a host
@@ -52,8 +52,7 @@ function dockerAvailable(): boolean {
 
 const describeIfReal = target !== undefined && dockerAvailable() ? describe : describe.skip;
 
-const IGNORE = "**/node_modules,!/vendor/node_modules,/dist";
-const NATIVE = "**/node_modules";
+const IGNORE = "**/node_modules,!/vendor/node_modules,/dist,**/*.tsbuildinfo";
 
 interface Booted {
   cid: string;
@@ -155,7 +154,7 @@ describeIfReal("native roots under a real mount", () => {
   let available = false;
 
   beforeAll(async () => {
-    booted = await boot({ MOUNT_IGNORE: IGNORE, MOUNT_NATIVE: NATIVE });
+    booted = await boot({ MOUNT_IGNORE: IGNORE });
     available = (await nativeInfo(booted)).enabled;
   }, 120_000);
 
@@ -227,7 +226,14 @@ describeIfReal("native roots under a real mount", () => {
     expect(sh(b, "cat reval/node_modules/f").stdout).toBe("x\n");
   }, 30_000);
 
-  test("nothing but a topmost native directory is mounted", async (ctx) => {
+  test("every local-only pattern's directory is mounted, not only node_modules", async (ctx) => {
+    const b = ready(ctx);
+    sh(b, "mkdir -p dist/assets && echo x > dist/assets/app.js");
+    expect(await waitForMount(b, "/workspace/dist")).toBe(true);
+    expect(sh(b, "cat dist/assets/app.js").stdout).toBe("x\n");
+  }, 30_000);
+
+  test("nothing but a topmost local-only directory is mounted", async (ctx) => {
     const b = ready(ctx);
     const result = sh(
       b,
@@ -236,8 +242,8 @@ describeIfReal("native roots under a real mount", () => {
         "mkdir -p top/node_modules/pkg/node_modules",
         // Kept synced by an exclusion.
         "mkdir -p vendor/node_modules",
-        // Local-only, but not in MOUNT_NATIVE.
-        "mkdir -p dist/assets",
+        // A file pattern: local-only, but never a mount.
+        "echo x > tsconfig.tsbuildinfo",
         // A symlink where a root would be.
         "mkdir -p linked/real && ln -s real linked/node_modules",
         "sleep 1",
@@ -248,7 +254,7 @@ describeIfReal("native roots under a real mount", () => {
     const all = mounts(b);
     expect(all).not.toContain("/workspace/top/node_modules/pkg/node_modules");
     expect(all).not.toContain("/workspace/vendor/node_modules");
-    expect(all).not.toContain("/workspace/dist");
+    expect(all).not.toContain("/workspace/tsconfig.tsbuildinfo");
     expect(all).not.toContain("/workspace/linked/node_modules");
   }, 30_000);
 
@@ -320,7 +326,7 @@ describeIfReal("native roots across restarts", () => {
   // Stands in for a container snapshot: the disk comes back, the mount
   // table does not.
   async function restore(env: Record<string, string>): Promise<Booted> {
-    const first = await boot({ MOUNT_IGNORE: IGNORE, MOUNT_NATIVE: NATIVE, ...env });
+    const first = await boot({ MOUNT_IGNORE: IGNORE, ...env });
     started.push(first);
     sh(first, "mkdir -p a/node_modules/x b/c/node_modules && echo kept > a/node_modules/x/f");
     expect(await waitForMount(first, "/workspace/b/c/node_modules")).toBe(true);
@@ -330,7 +336,6 @@ describeIfReal("native roots across restarts", () => {
     kill(first);
     const second = await boot({
       MOUNT_IGNORE: IGNORE,
-      MOUNT_NATIVE: NATIVE,
       COMPUTERD_HARNESS_IMAGE: name,
       ...env,
     });
@@ -363,7 +368,7 @@ describeIfReal("native roots across restarts", () => {
   }, 120_000);
 
   test("SIGTERM detaches the roots before unmounting FUSE", async (ctx) => {
-    const b = await boot({ MOUNT_IGNORE: IGNORE, MOUNT_NATIVE: NATIVE });
+    const b = await boot({ MOUNT_IGNORE: IGNORE });
     started.push(b);
     if (!(await nativeInfo(b)).enabled) ctx.skip();
     sh(b, "mkdir -p node_modules && echo x > node_modules/f");
@@ -384,12 +389,19 @@ describeIfReal("native roots across restarts", () => {
     expect(`${out}${err}`).not.toMatch(/failed to unmount FUSE/);
   }, 60_000);
 
+  test("COMPUTERD_FUSE_NATIVE_ROOTS=0 turns them off, leaving passthrough", async () => {
+    const b = await boot({ MOUNT_IGNORE: IGNORE, COMPUTERD_FUSE_NATIVE_ROOTS: "0" });
+    started.push(b);
+    const info = await nativeInfo(b);
+    expect(info.enabled).toBe(false);
+    expect(info.reason).toMatch(/COMPUTERD_FUSE_NATIVE_ROOTS/);
+    sh(b, "mkdir -p node_modules && echo x > node_modules/f && sleep 1");
+    expect(mounts(b)).toEqual([]);
+    expect(sh(b, "cat node_modules/f").stdout).toBe("x\n");
+  }, 60_000);
+
   test("without passthrough, native roots stay off and nothing is mounted", async () => {
-    const b = await boot({
-      MOUNT_IGNORE: IGNORE,
-      MOUNT_NATIVE: NATIVE,
-      COMPUTERD_FUSE_PASSTHROUGH: "0",
-    });
+    const b = await boot({ MOUNT_IGNORE: IGNORE, COMPUTERD_FUSE_PASSTHROUGH: "0" });
     started.push(b);
     const info = await nativeInfo(b);
     expect(info.enabled).toBe(false);

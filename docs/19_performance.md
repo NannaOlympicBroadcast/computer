@@ -120,14 +120,15 @@ transfer that no longer follows it.
 > Cloudflare Containers hardware. Treat the ratios as the result and the
 > absolute times as local. `script/run-fs-bench.sh` (with `LOCAL_ONLY=1`)
 > and `script/run-npm-bench.sh` (with `IGNORE_NODE_MODULES=1`) reproduce
-> them.
+> them, with `COMPUTERD_FUSE_NATIVE_ROOTS=0`: local-only directories are
+> now bind-mounted by default (next section).
 
-### Native roots (`MOUNT_NATIVE`)
+### Native roots
 
-Passthrough leaves metadata on computerd's event loop. A native root
-removes that too: the directory is bind-mounted from the container's
-disk, so nothing under it reaches computerd at all. See
-[`computerd`: Native roots](../packages/computerd/README.md#native-roots-mount_native).
+Passthrough leaves metadata on computerd's event loop. computerd now
+bind-mounts each local-only directory from the container's disk, so
+nothing under it reaches computerd at all. See
+[`computerd`: Native roots](../packages/computerd/README.md#native-roots).
 
 These runs were all taken on the same machine, one after another. The
 raw-disk column is the median of the baselines measured alongside each
@@ -164,8 +165,9 @@ times raw. `git clone` is dominated by the network and moves with it.
 > [!NOTE]
 > Same caveat as above: an arm64 Linux 7.0 virtual machine on a laptop
 > (OrbStack), not Cloudflare Containers. Reproduce with
-> `script/run-fs-bench.sh` (`LOCAL_ONLY=1 NATIVE_ROOTS=1`) and
-> `script/run-npm-bench.sh` (`IGNORE_NODE_MODULES=1 NATIVE_ROOTS=1`).
+> `script/run-fs-bench.sh` (`LOCAL_ONLY=1`) and `script/run-npm-bench.sh`
+> (`IGNORE_NODE_MODULES=1`); add `COMPUTERD_FUSE_NATIVE_ROOTS=0` for the
+> passthrough column.
 
 Writeback caching would cut metadata round trips further on writes. It
 stays off: libfuse 3 can negotiate it, but it changes write behavior for

@@ -17,17 +17,12 @@ MOUNT_IGNORE=""
 if [ "${IGNORE_NODE_MODULES:-0}" = "1" ]; then
   MOUNT_IGNORE="/ignored/*/node_modules"
 fi
-# NATIVE_ROOTS=1 bind-mounts those node_modules too (MOUNT_NATIVE).
-MOUNT_NATIVE=""
-if [ "${NATIVE_ROOTS:-0}" = "1" ]; then
-  MOUNT_NATIVE="$MOUNT_IGNORE"
-fi
 
 COMPUTERD_FUSE_TRACE="${COMPUTERD_FUSE_TRACE:-}" \
   COMPUTERD_FUSE_TRACE_FILE="${COMPUTERD_FUSE_TRACE_FILE:-}" \
   COMPUTERD_FUSE_PASSTHROUGH="${COMPUTERD_FUSE_PASSTHROUGH:-}" \
   MOUNT_IGNORE="$MOUNT_IGNORE" \
-  MOUNT_NATIVE="$MOUNT_NATIVE" \
+  COMPUTERD_FUSE_NATIVE_ROOTS="${COMPUTERD_FUSE_NATIVE_ROOTS:-}" \
   PORT=45678 MOUNT_POINT=/tmp/workspace /usr/local/bin/computerd >/tmp/computerd.log 2>&1 &
 COMPUTERD_PID=$!
 
@@ -46,7 +41,7 @@ if ! kill -0 "$COMPUTERD_PID" 2>/dev/null; then
 fi
 
 COMPUTERD_URL=""
-if [ -n "$MOUNT_NATIVE" ]; then
+if [ -n "$MOUNT_IGNORE" ]; then
   COMPUTERD_URL=http://127.0.0.1:45678
 fi
 

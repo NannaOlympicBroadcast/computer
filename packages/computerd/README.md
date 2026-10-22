@@ -43,7 +43,7 @@ Current filesystem support:
 
 - `@platformatic/vfs` in-memory filesystem provided by `@cloudflare/dofs`'s node provider.
 - FUSE operation adapter covering the full operation surface the binding exposes.
-- Local-only paths (`MOUNT_IGNORE`) served from the container's disk and kept out of sync. When the kernel supports it, their file data goes through FUSE passthrough and never reaches `computerd`.
+- Local-only paths (`MOUNT_IGNORE`) served from the container's disk and kept out of sync. When the kernel supports it, local-only directories are bind-mounted and never reach `computerd` at all; see [Native roots](#native-roots).
 - Unsupported FUSE operations return `ENOSYS` to the kernel; the binding logs a one-shot warning per operation.
 - capnweb RPC over `/api` exposes the workspace database and an `exec` runner to clients.
 - Synchronization is driven by whoever holds the other end of the session. The daemon serves `SyncRPC`; it does not run a sync loop of its own.
@@ -336,35 +336,24 @@ one transfer but still occupies the container's store. A wrapper that
 injects `ignore` into `fetchChanges` to keep a dependency tree out of the
 Durable Object should be deleted in favor of `MOUNT_IGNORE`.
 
-### Native roots (`MOUNT_NATIVE`)
+### Native roots
 
-A local-only path is served from the container's disk, but every
-lookup, `stat`, create, and listing under it still reaches computerd.
-FUSE passthrough sends the file data straight to the kernel; the
-metadata keeps coming through. For a dependency tree that is most of
-the work.
+A local-only path is served from the container's disk, but with FUSE
+passthrough alone every lookup, `stat`, create, and listing under it
+still reaches computerd; only file data goes straight to the kernel.
+For a dependency tree, metadata is most of the work.
 
-`MOUNT_NATIVE` names local-only directories to bind-mount instead. The
-mount's source is the directory computerd already serves the path from,
-under `MOUNT_IGNORE_PATH`, so everything under it is served by the
-kernel from the container's disk and never reaches computerd at all.
-Content is the same either way. A mount only changes how fast a path is
-served, so a mount that fails, lands late, or is removed is never a
+So computerd bind-mounts each local-only directory onto the mount from
+the place it already stores it, under `MOUNT_IGNORE_PATH`. Everything
+under it is then served by the kernel from the container's disk and
+never reaches computerd at all. A native root is a local-only directory
+whose parent is synced: `packages/app/node_modules` is one, the
+`node_modules` directories nested inside it are already under it, and a
+file pattern such as `**/*.tsbuildinfo` never is.
+
+The content is the same either way. A mount only changes how fast a path
+is served, so a mount that fails, lands late, or is removed is never a
 problem for what a command sees.
-
-```ts
-new ContainerBackend({
-  ignore: ["**/node_modules", "/dist"],
-  containerEnv: { MOUNT_NATIVE: "**/node_modules" },
-});
-```
-
-Each entry must also be in `MOUNT_IGNORE`, written the same way after
-normalization, and must not be an exclusion; anything else fails the
-daemon at startup. A native root is the topmost directory a
-`MOUNT_NATIVE` pattern names: `packages/app/node_modules` is one, the
-`node_modules` directories nested inside it are already under it. A
-symlink or a file is never mounted.
 
 Roots are mounted when they appear, with no watcher:
 
@@ -377,18 +366,19 @@ Roots are mounted when they appear, with no watcher:
   parent is back from the host.
 - At startup, for roots already on disk.
 
-Native roots need FUSE passthrough to be negotiated (Linux 6.9 or newer,
-and `COMPUTERD_FUSE_PASSTHROUGH` not turned off), `CAP_SYS_ADMIN`, and
-`mount` from util-linux in the image. Without any of these, the paths
-are served exactly as before.
+Native roots need FUSE passthrough to be negotiated (Linux 6.9 or newer),
+`CAP_SYS_ADMIN`, and `mount` from util-linux in the image. Without any
+of these, local-only paths are served through FUSE as described above.
+`COMPUTERD_FUSE_NATIVE_ROOTS=0` turns them off, for ruling them in or out
+while chasing a problem.
 
-#### The one difference: removing or renaming a root
+#### Removing or renaming a root
 
 `rmdir(2)` and `rename(2)` of a directory that is itself a mount point
 fail with `EBUSY`, and the kernel never asks computerd, so it cannot
 intervene:
 
-| Command | Without a native root | With one |
+| Command | Through FUSE | On a native root |
 | --- | --- | --- |
 | `rm -rf node_modules` | works | empties it, then `EBUSY` on the directory itself |
 | `rm -rf node_modules/*` | works | works |
@@ -396,9 +386,8 @@ intervene:
 | `rm -rf packages/app` with a root inside | works | `EBUSY` on the root |
 | `mv packages/app packages/web` | works | works; the mount moves with it |
 
-These are the rules of a Docker volume mounted at `node_modules`, which
-most JavaScript tooling already lives with. To remove a root outright,
-detach it first:
+These are the rules of a Docker volume mounted at `node_modules`. To
+remove a root outright, detach it first:
 
 ```sh
 curl -X POST http://127.0.0.1:$PORT/__computerd/native-roots/detach \
@@ -423,15 +412,15 @@ was and computerd serves it through FUSE.
 `/__computerd/info` reports `ignore.fastPaths.nativeRoots`:
 
 ```json
-{ "enabled": true, "reason": "active", "patterns": ["**/node_modules"],
-  "active": 3, "mounts": 4, "failures": 0, "detaches": 1 }
+{ "enabled": true, "reason": "active", "active": 3, "mounts": 4,
+  "failures": 0, "detaches": 1 }
 ```
 
 `active` is read from `/proc/self/mountinfo`, which is the only record
 of what is mounted: anything mounted under `MOUNT_POINT` other than the
 FUSE mount itself is a native root. `reason` explains a disabled state
-(not configured, no kernel FUSE mount, passthrough off or not offered)
-or names the last failure when mounts are being refused.
+(no `MOUNT_IGNORE`, no kernel FUSE mount, turned off, passthrough off or
+not offered) or names the last failure when mounts are being refused.
 `/__computerd/stats` carries the same counters under
 `localPaths.nativeRoots`, along with `lastFailure`.
 
@@ -471,7 +460,7 @@ COMPUTER_VAR_NODE_ENV=production  # forwarded into exec as NODE_ENV
 COMPUTERD_DB=/var/lib/computerd/state.db  # on-disk store; "memory" or unset keeps it in memory
 MOUNT_IGNORE=node_modules,dist    # local-only paths, kept on the container's disk and out of sync
 COMPUTERD_FUSE_PASSTHROUGH=0      # serve local-only paths through computerd instead of the kernel
-MOUNT_NATIVE=**/node_modules      # local-only directories to bind-mount; each must also be in MOUNT_IGNORE
+COMPUTERD_FUSE_NATIVE_ROOTS=0     # serve local-only directories through FUSE instead of bind-mounting them
 ```
 
 `COMPUTERD_FUSE_PASSTHROUGH` is on by default and only matters when `MOUNT_IGNORE` is set. Turning it off is for ruling passthrough in or out while chasing a problem.

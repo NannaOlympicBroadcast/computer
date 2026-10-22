@@ -53,12 +53,12 @@ RUN apt-get update >/dev/null \
 DOCKERFILE
 fi
 
-# Lets a test boot computerd with MOUNT_IGNORE, MOUNT_NATIVE, COMPUTERD_DB, or
-# COMPUTERD_FUSE_* set.
+# Lets a test boot computerd with MOUNT_IGNORE, COMPUTERD_DB, or COMPUTERD_FUSE_*
+# set.
 FORWARD_ENV=()
 while IFS='=' read -r name _; do
   case "$name" in
-    MOUNT_IGNORE | MOUNT_IGNORE_PATH | MOUNT_NATIVE | COMPUTERD_DB | COMPUTERD_FUSE_*) FORWARD_ENV+=(-e "$name") ;;
+    MOUNT_IGNORE | MOUNT_IGNORE_PATH | COMPUTERD_DB | COMPUTERD_FUSE_*) FORWARD_ENV+=(-e "$name") ;;
   esac
 done < <(env)
 
