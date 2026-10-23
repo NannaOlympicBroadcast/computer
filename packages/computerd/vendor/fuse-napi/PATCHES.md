@@ -14,7 +14,9 @@ it is a much shorter path to passthrough than patching libfuse 2.
 
 ## What we changed
 
-All changes are in `fuse-native.c`, `index.js`, and `index.d.ts`.
+The passthrough changes live in `fuse-native.c`, `index.js`, and `index.d.ts`.
+Native roots also add `removal-guard.c`, `removal-guard.h`, and
+`confined-bind.c`, linked through `binding.gyp`.
 
 ### `fuse-native.c`
 
@@ -89,6 +91,19 @@ point fail with `EBUSY` in the VFS before FUSE is consulted.
 - Linux on x86_64 and aarch64 only; elsewhere every entry point returns
   `-ENOSYS`. Exported from `fuse-native.c`'s init and wrapped in
   `index.js` as `Fuse.removalGuard`, typed in `index.d.ts`.
+
+### `confined-bind.c` (new), `binding.gyp`
+
+Native roots use asynchronous addon calls so resolving a directory under the
+FUSE mount cannot block its JavaScript event loop. `bindRoot` resolves both
+paths beneath pinned directory descriptors with `openat2` and rejects symlinks.
+It clones the source with `open_tree` and attaches it to the pinned target
+with `move_mount`, after making the parent and clone private. The source
+identity is checked before attachment, so no path-based cleanup follows a
+successful mount. `unbindRoot` and `openRoot` likewise resolve beneath the
+pinned mount root; the latter hands its descriptor to the removal guard.
+If these system calls are unavailable, the bind fails without running a
+path-based mount command, leaving the directory served through FUSE.
 
 ## Verified on this host
 

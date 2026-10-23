@@ -18,12 +18,9 @@ ARG TYPST_VERSION=0.15.1
 # pandoc converts the agent's markdown; typst is the PDF engine, a
 # single 30 MB binary instead of the several hundred megabytes a LaTeX
 # install would cost. curl is only the download tool for those two.
-# libfuse2t64 is for the pinned binary while that tag is 0.6.0 or earlier,
-# which link libfuse 2. Later releases need only fuse3, at libfuse 3.17
-# or newer (Debian trixie); drop libfuse2t64 once the tag is past 0.6.0.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      fuse3 libfuse2t64 ca-certificates curl xz-utils \
+      fuse3 ca-certificates curl xz-utils \
  && curl -fsSL -o /tmp/pandoc.deb \
       "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb" \
  && dpkg -i /tmp/pandoc.deb \

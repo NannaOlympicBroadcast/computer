@@ -419,8 +419,8 @@ curl -X POST http://127.0.0.1:$PORT/__computerd/native-roots/detach \
 
 The answer lists what was detached. A detached root is not mounted
 again until it is created again, so the `rm -rf` that follows cannot
-race a remount. A detach is always safe: the directory stays where it
-was and computerd serves it through FUSE.
+race a remount. Detaching a native root leaves its backing directory in
+place and computerd serves it through FUSE.
 
 #### Other differences
 
@@ -440,9 +440,10 @@ was and computerd serves it through FUSE.
   "transparentRemovalReason": "active", "removalDetaches": 1 }
 ```
 
-`active` is read from `/proc/self/mountinfo`, which is the only record
-of what is mounted: anything mounted under `MOUNT_POINT` other than the
-FUSE mount itself is a native root. `reason` explains a disabled state
+`active` is read from `/proc/self/mountinfo`, which is the only mount
+record. computerd treats every mount below `MOUNT_POINT` as a native root
+and detaches it on startup and shutdown. Do not create unrelated mounts
+under the workspace while native roots are enabled. `reason` explains a disabled state
 (no `MOUNT_IGNORE`, no kernel FUSE mount, turned off, passthrough off or
 not offered) or names the last failure when mounts are being refused.
 `transparentRemoval` says whether the removal guard is on, and

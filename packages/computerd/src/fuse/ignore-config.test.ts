@@ -247,10 +247,18 @@ describe("describeMountIgnore: nativeRoots", () => {
   });
 
   test("names the failure when every mount was refused", () => {
-    const refused = { ...native, active: 0, mounts: 0, failures: 4, lastFailure: "a: exited 32" };
+    const refused = {
+      ...native,
+      active: 0,
+      mounts: 0,
+      failures: 4,
+      lastFailure: "a: confined bind failed (-38)",
+    };
     const info = describeMountIgnore(configured, live, refused).fastPaths.nativeRoots;
     expect(info.enabled).toBe(true);
     expect(info.reason).toMatch(/every mount so far was refused/);
-    expect(info.reason).toMatch(/exited 32/);
+    expect(info.reason).toMatch(/confined bind failed \(-38\)/);
+    expect(info.reason).toMatch(/native helper/);
+    expect(info.reason).not.toMatch(/util-linux/);
   });
 });

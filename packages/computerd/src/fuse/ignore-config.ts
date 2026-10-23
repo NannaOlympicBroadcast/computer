@@ -194,8 +194,8 @@ function nativeActiveReason(native: NativeRootsStatus | undefined): string {
   if (native.mounts === 0) {
     return (
       `active, but every mount so far was refused (${native.failures}; last: ` +
-      `${native.lastFailure ?? "unknown"}); check that computerd has CAP_SYS_ADMIN and ` +
-      `that util-linux mount is installed`
+      `${native.lastFailure ?? "unknown"}); check CAP_SYS_ADMIN, kernel mount support, ` +
+      `and the native helper`
     );
   }
   return `active; ${native.failures} mount(s) failed and those paths are served through FUSE`;

@@ -158,16 +158,17 @@ run, and the local-only columns have passthrough on.
 | front-end toolchain (5,428 files, 91 MB), install | 3,643 | 2,165 | **1,365** | 1,336 |
 | front-end toolchain (5,428 files, 91 MB), read back | 2,114 | 707 | **52** | 50 |
 
-Under a native root every scenario lands at raw disk, within run-to-run
-noise, where passthrough alone left metadata-heavy work at 15 to 25
-times raw. `git clone` is dominated by the network and moves with it.
+Metadata-heavy local work under a native root approaches raw disk, where
+passthrough alone leaves directory operations on computerd's event loop.
+`git clone` is dominated by the network and varies between runs.
 
 > [!NOTE]
 > Same caveat as above: an arm64 Linux 7.0 virtual machine on a laptop
 > (OrbStack), not Cloudflare Containers. Reproduce with
 > `script/run-fs-bench.sh` (`LOCAL_ONLY=1`) and `script/run-npm-bench.sh`
 > (`IGNORE_NODE_MODULES=1`); add `COMPUTERD_FUSE_NATIVE_ROOTS=0` for the
-> passthrough column.
+> passthrough column. These numbers predate the descriptor-confined mount
+> helper; they measure steady-state file operations, not mount setup time.
 
 Writeback caching would cut metadata round trips further on writes. It
 stays off: libfuse 3 can negotiate it, but it changes write behavior for

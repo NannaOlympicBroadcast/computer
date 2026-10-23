@@ -796,8 +796,8 @@ async function main(): Promise<void> {
     },
   };
 
-  // Native roots: every local-only directory is bind-mounted from where
-  // it is stored. Built before the mount so the passthrough layer can call
+  // Native roots: eligible local-only directories can be bind-mounted from
+  // where they are stored. Built before the mount so the passthrough layer can call
   // into it, and switched on only once the kernel has negotiated FUSE
   // passthrough: `active` is read on every call.
   const nativeRootsWanted = nativeRootsRequested(process.env);
@@ -836,8 +836,8 @@ async function main(): Promise<void> {
       if (ignoreConfig.enabled) {
         await mkdir(ignoreConfig.root, { recursive: true });
       }
-      // Bind mounts a previous run left under the mount point, if any. A
-      // lazy detach is always safe, so there is nothing to check first.
+      // Detach binds left by a previous run before remounting FUSE. This
+      // assumes no other subsystem puts mounts below the mount point.
       await nativeRoots?.detachAll();
       fuse = await mountFuse({
         backend,
