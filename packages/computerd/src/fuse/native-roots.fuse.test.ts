@@ -479,6 +479,36 @@ describeIfReal("native roots across restarts", () => {
     expect((await nativeInfo(second)).failures).toBe(0);
   }, 120_000);
 
+  test("restore refuses a backing root whose workspace parent is a symlink", async (ctx) => {
+    const first = await boot({ MOUNT_IGNORE: IGNORE, COMPUTERD_DB: "/var/lib/computerd/state.db" });
+    started.push(first);
+    if (!(await nativeInfo(first)).enabled) ctx.skip();
+    // The backing store can outlive the synced tree. A workspace symlink
+    // must never redirect a privileged bind mount outside /workspace.
+    const setup = sh(
+      first,
+      "mkdir -p /opt/victim/node_modules /tmp/workspace/q/node_modules && " +
+        "echo original > /opt/victim/node_modules/marker && " +
+        "echo planted > /tmp/workspace/q/node_modules/planted && " +
+        "ln -s /opt/victim q",
+    );
+    expect(setup.code).toBe(0);
+    const name = `computerd-native-roots-symlink:${first.cid.slice(0, 12)}`;
+    images.push(name);
+    execFileSync("docker", ["commit", first.cid, name], { stdio: "ignore" });
+    kill(first);
+    const restored = await boot({
+      MOUNT_IGNORE: IGNORE,
+      COMPUTERD_DB: "/var/lib/computerd/state.db",
+      COMPUTERD_HARNESS_IMAGE: name,
+    });
+    started.push(restored);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(sh(restored, "cat /opt/victim/node_modules/marker").stdout).toBe("original\n");
+    expect(sh(restored, "test ! -e /opt/victim/node_modules/planted").code).toBe(0);
+    expect((await nativeInfo(restored)).active).toBe(0);
+  }, 120_000);
+
   test("with an in-memory store, a root mounts on first lookup once its parent is back", async (ctx) => {
     // The VFS starts empty and the host pushes synced directories back
     // later, so at startup there is nothing to mount onto yet.
