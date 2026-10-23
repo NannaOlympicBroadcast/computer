@@ -28,6 +28,8 @@ function harness(
     active?: () => boolean;
     /** Mount-relative targets that do not exist under the mount yet. */
     missingTargets?: Set<string>;
+    beforeTarget?: () => Promise<void>;
+    beforeBind?: () => Promise<void>;
   } = {},
 ): Harness {
   const ignore = resolveMountIgnore(options.ignore ?? ["**/node_modules", "/dist"], MOUNT);
@@ -50,6 +52,7 @@ function harness(
       commands.push(["bindRoot", source, target, rel]);
       if (options.mismatch) return -5; // Native verification failed before returning.
       if (options.mountExit) return -options.mountExit;
+      await options.beforeBind?.();
       mounted.add(`${target}/${rel}`);
       return 0;
     },
@@ -67,6 +70,7 @@ function harness(
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     },
     lstatTarget: async (path) => {
+      await options.beforeTarget?.();
       if (options.missingTargets?.has(path.slice(MOUNT.length + 1))) {
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }
@@ -464,6 +468,106 @@ describe("removal guard", () => {
 });
 
 describe("detach", () => {
+  test("a requested detach parks a root while its target lookup is pending", async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { roots, mounted, commands } = harness({
+      dirs: ["node_modules"],
+      beforeTarget: async () => {
+        entered();
+        await gate;
+      },
+    });
+    roots.ensure("node_modules");
+    await lookupStarted;
+    const detaching = roots.detach("node_modules");
+    release();
+    expect(await detaching).toEqual([]);
+    await roots.settled();
+    expect(mounted.size).toBe(0);
+    expect(commands).toEqual([]);
+  });
+
+  test("a requested detach waits for an in-flight bind before removing it", async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const bindStarted = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { roots, mounted } = harness({
+      dirs: ["node_modules"],
+      beforeBind: async () => {
+        entered();
+        await gate;
+      },
+    });
+    roots.ensure("node_modules");
+    await bindStarted;
+    const detaching = roots.detach("node_modules");
+    release();
+    expect(await detaching).toEqual([`${MOUNT}/node_modules`]);
+    expect(mounted.size).toBe(0);
+  });
+
+  test("a requested detach of all roots parks pending mounts", async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { roots, mounted } = harness({
+      dirs: ["node_modules"],
+      beforeTarget: async () => {
+        entered();
+        await gate;
+      },
+    });
+    roots.ensure("node_modules");
+    await lookupStarted;
+    const detaching = roots.detach();
+    release();
+    expect(await detaching).toEqual([]);
+    roots.ensure("node_modules");
+    await roots.settled();
+    expect(mounted.size).toBe(0);
+  });
+
+  test("detachAll waits for in-flight binds before cleaning up", async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const bindStarted = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { roots, mounted } = harness({
+      dirs: ["node_modules"],
+      beforeBind: async () => {
+        entered();
+        await gate;
+      },
+    });
+    roots.ensure("node_modules");
+    await bindStarted;
+    const detaching = roots.detachAll();
+    release();
+    expect(await detaching).toEqual([`${MOUNT}/node_modules`]);
+    expect(mounted.size).toBe(0);
+  });
+
   test("detachAll lazily detaches everything under the mount point, deepest first", async () => {
     const { roots, commands, mounted } = harness({ dirs: ["a/node_modules", "a/b/node_modules"] });
     roots.ensure("a/node_modules");

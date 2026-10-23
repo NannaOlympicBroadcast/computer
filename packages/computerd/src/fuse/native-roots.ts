@@ -145,6 +145,7 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
   const active = options.active ?? (() => true);
 
   const inflight = new Map<string, Promise<void>>();
+  let suspended = 0;
   // Roots a lookup must not mount: refused ones, and ones a caller
   // detached on purpose. Creating the directory again unparks it.
   const parked = new Set<string>();
@@ -273,7 +274,7 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
   }
 
   const ensure = (relativePath: string, created = false): void => {
-    if (!active()) return;
+    if (!active() || suspended > 0) return;
     const rel = stripSlashes(relativePath);
     if (!isRoot(rel) || inflight.has(rel)) return;
     if (parked.has(rel)) {
@@ -313,6 +314,10 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
     }
   };
 
+  const settled = async (): Promise<void> => {
+    while (inflight.size > 0) await Promise.all([...inflight.values()]);
+  };
+
   const detachTargets = async (targets: string[]): Promise<string[]> => {
     const detached: string[] = [];
     // Deepest first, so a parent is never detached out from under a child.
@@ -328,25 +333,35 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
     return detached;
   };
 
+  const detachAllTargets = async (park: boolean): Promise<string[]> => {
+    // Prevent new binds while existing workers settle. A requested detach
+    // parks roots; startup/shutdown cleanup leaves them available to scan.
+    suspended += 1;
+    try {
+      if (park) for (const rel of inflight.keys()) parked.add(rel);
+      await settled();
+      const targets = owned();
+      if (park) for (const target of targets) parked.add(relOf(target));
+      return await detachTargets(targets);
+    } finally {
+      suspended -= 1;
+    }
+  };
+
   return {
     ensure,
     scan: () => {
       if (active()) walk("", (rel) => ensure(rel));
     },
-    settled: async () => {
-      while (inflight.size > 0) await Promise.all([...inflight.values()]);
-    },
+    settled,
     detach: async (relativePath) => {
-      const all = owned();
-      const targets =
-        relativePath === undefined
-          ? all
-          : all.filter((candidate) => candidate === targetOf(stripSlashes(relativePath)));
-      const detached = await detachTargets(targets);
-      for (const target of detached) parked.add(relOf(target));
-      return detached;
+      if (relativePath === undefined) return detachAllTargets(true);
+      const rel = stripSlashes(relativePath);
+      if (isRoot(rel)) parked.add(rel);
+      await inflight.get(rel);
+      return detachTargets(owned().filter((target) => target === targetOf(rel)));
     },
-    detachAll: () => detachTargets(owned()),
+    detachAll: () => detachAllTargets(false),
     isRoot,
     attachGuard: async (attached) => {
       guard = attached;
