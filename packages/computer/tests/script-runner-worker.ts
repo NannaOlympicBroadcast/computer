@@ -6,8 +6,12 @@ import {
   type WorkerJavaScriptBackendOptions,
 } from "../src/backends/worker-javascript/index";
 import { createGitClient } from "../src/git/index";
-import type { WorkspaceRuntimeValue, WorkspaceStub } from "../src/index";
-import { Workspace } from "../src/index";
+import type {
+  WorkspaceRuntimePendingCall,
+  WorkspaceRuntimeValue,
+  WorkspaceStub,
+} from "../src/index";
+import { unsafeToRepeat, Workspace } from "../src/index";
 import { createArtifactsModule } from "../src/modules/artifacts";
 import { createContainerModule } from "../src/modules/container";
 import { createGitModule } from "../src/modules/git";
@@ -57,21 +61,42 @@ function fakeContainerBackend(): WorkspaceBackend {
   };
 }
 
+// Durable execution tests restart the object with ctx.abort(). Module
+// state outlives the object, so it counts host calls across the restart
+// and holds the gate a run waits on until the object restarts.
+const durableCalls = new Map<string, number>();
+// Each call onWait was told about.
+const waits: WorkspaceRuntimePendingCall[] = [];
+let gateOpen = false;
+// Named gates a run can wait on after the first, for a second restart.
+const opened = new Set<string>();
+
+function countCall(name: string): number {
+  const count = (durableCalls.get(name) ?? 0) + 1;
+  durableCalls.set(name, count);
+  return count;
+}
+
 // The Worker Loader resolves imports differently under the legacy and
 // the new module registry, so the same backend runs on both.
 const NEW_REGISTRY_BACKEND = "worker-javascript-new-registry";
+const NETWORK_BACKEND = "worker-javascript-network";
 
 function javascriptBackend(
   env: Env,
   overrides: Partial<
-    Pick<WorkerJavaScriptBackendOptions, "id" | "compatibilityFlags" | "loader">
+    Pick<
+      WorkerJavaScriptBackendOptions,
+      "id" | "compatibilityFlags" | "loader" | "egress" | "maxStdioBytes"
+    >
   > = {},
 ) {
   return new WorkerJavaScriptBackend({
     loader: env.LOADER,
     ...overrides,
-    maxStdioBytes: 64,
+    maxStdioBytes: overrides.maxStdioBytes ?? 64,
     maxCapabilityBytes: 1024,
+    onWait: (call) => void waits.push(call),
     maxConcurrentCapabilityCalls: 2,
     modules: {
       "math-kit": "export const double = (value) => value * 2;",
@@ -93,6 +118,28 @@ function javascriptBackend(
         async delete(args) {
           return { deleted: args[0] ?? null };
         },
+        async tick(args) {
+          return countCall(String(args[0] ?? "tick"));
+        },
+        // Never settles before the object restarts.
+        async gate() {
+          countCall("gate");
+          if (!gateOpen) await new Promise(() => undefined);
+          return "open";
+        },
+        // Never settles before a restart opens it by name.
+        async hold(args) {
+          const name = String(args[0]);
+          countCall(name);
+          if (!opened.has(name)) await new Promise(() => undefined);
+          return "open";
+        },
+        // The gate, for a call that mustn't run twice.
+        unsafeGate: unsafeToRepeat(async () => {
+          countCall("gate");
+          if (!gateOpen) await new Promise(() => undefined);
+          return "open";
+        }),
         async invalidResult() {
           // SAFETY: The test hands the bridge a non-JSON value on purpose to check that it rejects it.
           return new Date() as never;
@@ -103,6 +150,38 @@ function javascriptBackend(
         async slow() {
           await new Promise((resolve) => setTimeout(resolve, 20));
           return null;
+        },
+        // Settles after args[0] milliseconds and counts the call as args[1].
+        async wait(args) {
+          await new Promise((resolve) => setTimeout(resolve, Number(args[0])));
+          return countCall(String(args[1] ?? "wait"));
+        },
+        // Counts when it starts and again when it settles, and stops early
+        // if its call is aborted.
+        async slowTick(args, ctx) {
+          countCall(`start:${String(args[1])}`);
+          await new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, Number(args[0]));
+            ctx.signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              reject(ctx.signal.reason);
+            });
+          });
+          return countCall(String(args[1]));
+        },
+        // Waits for an answer, then returns it.
+        async approve(args, ctx) {
+          const action = String(args[0]);
+          countCall(`ask:${action}`);
+          const answer = await ctx.interrupt({ kind: "approval", action });
+          countCall(`answered:${action}`);
+          return answer;
+        },
+        // Like approve, but awaits first, as a real lookup would.
+        async approveLater(args, ctx) {
+          const action = String(args[0]);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return ctx.interrupt({ kind: "approval", action });
         },
         async marker() {
           return {
@@ -134,6 +213,11 @@ export class HostDO extends DurableObject<Env> {
             load: (code: Parameters<Env["LOADER"]["load"]>[0]) =>
               env.LOADER.load({ ...code, allowExperimental: true }),
           },
+        }),
+        javascriptBackend(env, {
+          id: NETWORK_BACKEND,
+          egress: { mode: "http-gateway", gateway: ctx.exports.TestGateway },
+          maxStdioBytes: 4096,
         }),
         fakeContainerBackend(),
       ],
@@ -192,10 +276,10 @@ export class HostDO extends DurableObject<Env> {
     return handle.id;
   }
 
-  async getRuntime(id: string, resume?: "tail") {
+  async getRuntime(id: string, resume?: "tail", network?: boolean) {
     try {
       const handle = await this.#workspace.runtime.getExec(id, {
-        backend: "worker-javascript",
+        backend: network === true ? NETWORK_BACKEND : "worker-javascript",
         encoding: "utf8",
         resume,
       });
@@ -206,6 +290,79 @@ export class HostDO extends DurableObject<Env> {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  async startDurable(input: {
+    source: string;
+    id: string;
+    onInterrupt?: "fail" | "restart" | "replay";
+    network?: boolean;
+  }) {
+    gateOpen = false;
+    opened.clear();
+    durableCalls.clear();
+    await this.#workspace.fs.mkdir("/workspace", { recursive: true });
+    const handle = await this.#workspace.runtime.exec(input.source, {
+      backend: input.network === true ? NETWORK_BACKEND : "worker-javascript",
+      id: input.id,
+      onInterrupt: input.onInterrupt,
+    });
+    void handle.result().catch(() => undefined);
+    // Let the run reach the gate.
+    for (let attempt = 0; attempt < 500 && !durableCalls.has("gate"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return handle.id;
+  }
+
+  async startWaiting(input: {
+    source: string;
+    id: string;
+    onInterrupt?: "fail" | "restart" | "replay";
+    timeoutMs?: number;
+  }) {
+    durableCalls.clear();
+    waits.length = 0;
+    const handle = await this.#workspace.runtime.exec(input.source, {
+      backend: "worker-javascript",
+      id: input.id,
+      onInterrupt: input.onInterrupt ?? "replay",
+      timeoutMs: input.timeoutMs,
+    });
+    void handle.result().catch(() => undefined);
+    return handle.id;
+  }
+
+  pending() {
+    return this.#workspace.runtime.pending();
+  }
+
+  waits() {
+    return waits;
+  }
+
+  async respond(id: string, callId: string, value: WorkspaceRuntimeValue) {
+    try {
+      await this.#workspace.runtime.respond(id, callId, value);
+      return { ok: true as const };
+    } catch (error) {
+      return { ok: false as const, code: (error as { code?: string }).code };
+    }
+  }
+
+  // Restart the object, as a deploy or crash would.
+  restart(open?: string) {
+    gateOpen = true;
+    if (open !== undefined) opened.add(open);
+    this.ctx.abort("test restart");
+  }
+
+  async recover() {
+    await this.#workspace.runtime.recover();
+  }
+
+  durableCalls() {
+    return Object.fromEntries(durableCalls);
   }
 
   killRuntime(id: string) {
@@ -253,6 +410,20 @@ class StdioProbeBridge extends RpcTarget {
 
   sinkResult(): string {
     return this.#sinkResult;
+  }
+}
+
+// The network a run with egress reaches. It counts each request, so a
+// test can tell whether a replay sent it again.
+export class TestGateway extends WorkerEntrypoint<Env> {
+  override async fetch(request: Request) {
+    const count = countCall("fetch");
+    return new Response(
+      `${request.method} ${new URL(request.url).pathname} ${await request.text()} #${count}`,
+      {
+        headers: { "x-count": String(count) },
+      },
+    );
   }
 }
 
@@ -412,10 +583,68 @@ export default class extends WorkerEntrypoint<Env> {
         const response = await stub.getRuntime(
           url.searchParams.get("id") ?? "missing",
           url.searchParams.get("resume") === "tail" ? "tail" : undefined,
+          url.searchParams.has("network"),
         );
         return response.ok
           ? Response.json(response.result)
           : Response.json({ error: response.error }, { status: 400 });
+      }
+
+      if (url.pathname === "/durable-start") {
+        return Response.json({
+          id: await stub.startDurable(
+            (await request.json()) as {
+              source: string;
+              id: string;
+              onInterrupt?: "fail" | "restart" | "replay";
+              network?: boolean;
+            },
+          ),
+        });
+      }
+
+      if (url.pathname === "/durable-restart") {
+        await stub.restart(url.searchParams.get("open") ?? undefined).catch(() => undefined);
+        return new Response(null, { status: 204 });
+      }
+
+      if (url.pathname === "/durable-recover") {
+        await stub.recover();
+        return new Response(null, { status: 204 });
+      }
+
+      if (url.pathname === "/interrupt-start") {
+        return Response.json({
+          id: await stub.startWaiting(
+            (await request.json()) as {
+              source: string;
+              id: string;
+              onInterrupt?: "fail" | "restart" | "replay";
+              timeoutMs?: number;
+            },
+          ),
+        });
+      }
+
+      if (url.pathname === "/interrupt-waits") {
+        return Response.json(await stub.waits());
+      }
+
+      if (url.pathname === "/interrupt-pending") {
+        return Response.json(await stub.pending());
+      }
+
+      if (url.pathname === "/interrupt-respond") {
+        const body = (await request.json()) as {
+          id: string;
+          callId: string;
+          value: WorkspaceRuntimeValue;
+        };
+        return Response.json(await stub.respond(body.id, body.callId, body.value));
+      }
+
+      if (url.pathname === "/durable-calls") {
+        return Response.json(await stub.durableCalls());
       }
 
       if (url.pathname === "/runtime-kill") {

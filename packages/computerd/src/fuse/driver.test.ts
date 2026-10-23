@@ -1069,3 +1069,69 @@ test("FUSE ftruncate does not depend on fuse-native binding this", async () => {
   expect(await status((cb) => ops.flush("/ftruncate-this.txt", fh, cb))).toBe(0);
   expect(Buffer.from(vfs.readFileSync("/ftruncate-this.txt")).toString("utf8")).toBe("abc");
 });
+
+for (const listing of ["batched", "per entry"] as const) {
+  test(`readdir gives each entry the type and inode getattr reports (${listing})`, async () => {
+    // libfuse takes d_type from these stats. Without them every entry is
+    // DT_UNKNOWN, and readers that trust d_type skip it: bun's hardlink
+    // install walking a cache on the mount linked nothing.
+    const { vfs } = await createNodeVirtualFileSystem();
+    vfs.mkdirSync("/dir/sub", { recursive: true });
+    vfs.writeFileSync("/dir/file.txt", Buffer.from("x"));
+    vfs.symlinkSync("file.txt", "/dir/link");
+    // "per entry" is a VFS without the batched listing, which the driver
+    // stats name by name.
+    const source =
+      listing === "batched"
+        ? vfs
+        : new Proxy(vfs, {
+            // Bound to the real object: the VFS keeps private fields,
+            // which a call with the proxy as `this` cannot reach.
+            get: (target, property) => {
+              if (property === "readdirEntriesSync") return undefined;
+              const value: unknown = Reflect.get(target, property);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+    const ops = makeFUSEOps(source);
+    expect(await status((cb) => ops.link("/dir/file.txt", "/dir/hard.txt", cb))).toBe(0);
+    expect(await status((cb) => ops.chmod("/dir/file.txt", 0o700, cb))).toBe(0);
+    // Created through the driver and not yet flushed, so only the driver
+    // knows about it.
+    expect((await callback((cb) => ops.create("/dir/pending.txt", 0o644, cb))).errno).toBe(0);
+
+    const result = await new Promise<{ errno: number; names: string[]; stats: unknown[] }>(
+      (resolve) =>
+        ops.readdir("/dir", (errno, names, stats = []) => resolve({ errno, names, stats })),
+    );
+    expect(result.errno).toBe(0);
+    expect([...result.names].sort()).toEqual([
+      "file.txt",
+      "hard.txt",
+      "link",
+      "pending.txt",
+      "sub",
+    ]);
+    expect(result.stats).toHaveLength(result.names.length);
+
+    const S_IFMT = 0o170000;
+    const types: Record<string, number> = {};
+    for (const [i, name] of result.names.entries()) {
+      const fromListing = result.stats[i] as { mode: number; ino: number };
+      const fromGetattr = (await callback((cb) => ops.getattr(`/dir/${name}`, cb))).result as {
+        mode: number;
+        ino: number;
+      };
+      expect(fromListing.mode, name).toBe(fromGetattr.mode);
+      expect(fromListing.ino, name).toBe(fromGetattr.ino);
+      types[name] = fromListing.mode & S_IFMT;
+    }
+    expect(types).toEqual({
+      "file.txt": 0o100000,
+      "hard.txt": 0o100000,
+      link: 0o120000,
+      "pending.txt": 0o100000,
+      sub: 0o040000,
+    });
+  });
+}

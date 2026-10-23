@@ -22,7 +22,7 @@ export {
   invalidateReadOnlyMountCache,
   readOnlyRootFor,
 } from "./fs/mount-guard";
-export type { ReaddirOptions, WorkspaceDirentResult } from "./fs/readdir";
+export type { ReaddirOptions, WorkspaceDirentEntry, WorkspaceDirentResult } from "./fs/readdir";
 export type { ReadFileOptions } from "./fs/readFile";
 export { readlink } from "./fs/readlink";
 export { rename } from "./fs/rename";

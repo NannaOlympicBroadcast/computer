@@ -15,7 +15,7 @@
     "@cfworker/json-schema": "^4.1.1",
     "@cloudflare/codemode": "^0.5.0",
     "@cloudflare/computer": "*",
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@platformatic/vfs": "^0.4.0",
     "ai": "^7.0.0",
     "just-bash": "^3.0.1",
@@ -24,7 +24,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "wrangler": "^4.148.0"
   }
 }

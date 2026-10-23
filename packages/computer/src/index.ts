@@ -31,12 +31,14 @@ export type { BackendHandle, WorkspaceBackend } from "./backend";
 export { TestBackend, type TestBackendOptions } from "./backends/test";
 export {
   getWorkspace,
+  type LazyWorkspaceClient,
   type RuntimeExecOptions,
   type RuntimeGetOptions,
   type RuntimeKillOptions,
   type WorkspaceClient,
   type WorkspaceHandle,
   type WorkspaceRuntimeClient,
+  type WorkspaceSource,
 } from "./client";
 export { decodeExecEvents, encodeExecEvents } from "./exec-wire";
 export { R2Bucket, type R2BucketBinding, type R2BucketOptions } from "./mounts/providers/r2";
@@ -104,14 +106,17 @@ export type {
   WorkspaceRuntimeExecHandle,
   WorkspaceRuntimeExecOptions,
   WorkspaceRuntimeGetOptions,
+  WorkspaceRuntimeInterruptPolicy,
   WorkspaceRuntimeKillOptions,
   WorkspaceRuntimeLoader,
   WorkspaceRuntimeOutputOptions,
+  WorkspaceRuntimePendingCall,
   WorkspaceRuntimeResult,
   WorkspaceRuntimeStatus,
   WorkspaceRuntimeTruncation,
   WorkspaceRuntimeValue,
 } from "./runtime/types";
+export { unsafeToRepeat } from "./runtime/replay-safety";
 export { decodeRuntimeEvents, encodeRuntimeEvent } from "./runtime/wire";
 export { type RawShellValue, type ShellValue, sh, shellQuote } from "./sh";
 export type { ExecEncoding, ExecSyncResult, KillSignal } from "./shell";
@@ -129,9 +134,7 @@ export {
   type WorkspaceStubHost,
   withWorkspace,
 } from "./with-workspace";
-export {
-  type ThinkWorkspaceCompatibility,
-  Workspace,
-  type WorkspaceGitFactory,
-  type WorkspaceOptions,
-} from "./workspace";
+export { WorkspaceFileStore } from "./tools/common/fs/store";
+export type { FileStat, FileStore, MutableFileStore } from "./tools/common/fs/types";
+export { Workspace, type WorkspaceGitFactory, type WorkspaceOptions } from "./workspace";
+export { WORKSPACE_ROOT } from "./workspace-root";

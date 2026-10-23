@@ -22,6 +22,34 @@ export interface WorkspaceModuleCallContext {
    * @returns The confined absolute path.
    */
   resolvePath(path: string, options?: { readonly allowMissing?: boolean }): Promise<string>;
+  /**
+   * Identifies this call. When a replayable run is interrupted while the
+   * call is in flight and runs it again on resume, the second call gets
+   * the same id, so a function can use it as an idempotency key.
+   */
+  readonly callId: string;
+  /**
+   * Pause the run until a person or another system answers, and return
+   * the answer. The run is released while it waits, survives a deploy,
+   * and resumes once `workspace.runtime.respond()` answers this call:
+   * it replays to this call, and this function runs again with the same
+   * `callId`, this time getting the answer straight away. Anything the
+   * function does before `interrupt()` therefore runs twice, so keep it
+   * safe to repeat. Only a run with `onInterrupt: "replay"` can wait;
+   * anywhere else this throws. A call can interrupt once, and a second
+   * `interrupt()` throws. Experimental: it may change in any release.
+   *
+   * ```ts
+   * postComment: async ([issue, body], ctx) => {
+   *   const { approved } = await ctx.interrupt({ kind: "approval", issue, body });
+   *   if (!approved) throw new Error("The comment was rejected.");
+   *   return github.comment(issue, body, { idempotencyKey: ctx.callId });
+   * }
+   * ```
+   *
+   * @param payload What the answer is for, as `pending()` lists it.
+   */
+  interrupt<Answer = WorkspaceRuntimeValue>(payload: WorkspaceRuntimeValue): Promise<Answer>;
 }
 
 /**
@@ -207,6 +235,12 @@ export interface WorkspaceRuntimeExecOptions<E extends ExecEncoding = undefined>
   timeoutMs?: number;
   sync?: "wait" | "defer";
   /**
+   * What happens to this run if the Durable Object restarts while it
+   * runs, as on a deploy or crash. Overrides the backend's
+   * `onInterrupt`. Backends that can't resume a run ignore it.
+   */
+  onInterrupt?: WorkspaceRuntimeInterruptPolicy;
+  /**
    * How much output `result()` keeps per stream. Output past it is cut
    * to its last lines and saved in full to a Workspace file. Overrides
    * the Workspace's `output` limits for this run; `false` keeps all
@@ -259,6 +293,32 @@ export interface ModuleExecutionInput {
   stdin?: Uint8Array | string;
   timeoutMs?: number;
   sync?: "wait" | "defer";
+  onInterrupt?: WorkspaceRuntimeInterruptPolicy;
+}
+
+/**
+ * What a backend does with a run its Durable Object restarted under.
+ * `fail` settles it as failed. `restart` runs it again from the start.
+ * `replay` runs it again and answers the calls it already made from a
+ * journal, so their effects aren't repeated. `restart` and `replay` are
+ * experimental and may change in any release.
+ */
+export type WorkspaceRuntimeInterruptPolicy = "fail" | "restart" | "replay";
+
+/**
+ * A host module call waiting for an answer, from `ctx.interrupt()`.
+ * Experimental: it may change in any release.
+ */
+export interface WorkspaceRuntimePendingCall {
+  /** The execution the call belongs to. */
+  readonly id: string;
+  readonly backend: string;
+  /** Pass this to `respond()` to answer the call. */
+  readonly callId: string;
+  /** What the call passed to `ctx.interrupt()`. */
+  readonly payload: WorkspaceRuntimeValue;
+  /** When the call started waiting, in milliseconds since the epoch. */
+  readonly since: number;
 }
 
 export interface ModuleExecutionEnvelope {
@@ -288,6 +348,12 @@ export interface WorkspaceModuleBackendHandle {
   }): Promise<ModuleExecutionEnvelope>;
   killExec(input: { id: string; signal?: KillSignal; runtimeId?: string }): Promise<void>;
   disposeExec(input: { id: string; runtimeId?: string }): Promise<void>;
+  // Settle the runs a restart interrupted. A backend that recovers
+  // when it connects needs nothing more here.
+  recover?(): Promise<void>;
+  // Calls waiting for an answer, and answering one.
+  pending?(): Promise<Omit<WorkspaceRuntimePendingCall, "backend">[]>;
+  respond?(input: { id: string; callId: string; answer: WorkspaceRuntimeValue }): Promise<void>;
   // Tear down a backend-owned transport. The command adapter omits
   // it: a command backend's transport is closed through its
   // BackendHandle, not through the adapter the runtime consumes.

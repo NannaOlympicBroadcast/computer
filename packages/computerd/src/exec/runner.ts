@@ -37,6 +37,8 @@ interface ExecRecord {
   timeoutTimer?: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
   heartbeatTimer?: NodeJS.Timeout;
+  drainTimer?: NodeJS.Timeout;
+  drainDeadlineTimer?: NodeJS.Timeout;
 }
 
 interface LiveSubscriber {
@@ -61,6 +63,12 @@ const DEFAULTS = {
   // After SIGTERM, give the child this long to exit on its own
   // before sending SIGKILL.
   killGraceMs: 5_000,
+  // After the child exits, wait this long for its stdout and stderr to
+  // close before finishing the exec. See `RunnerOptions.exitDrainMs`.
+  exitDrainMs: 250,
+  // Finish the exec this long after the child exits even if the reader
+  // has stopped reading. See `RunnerOptions.exitDrainMaxMs`.
+  exitDrainMaxMs: 5_000,
   shell: "/bin/sh",
 } as const;
 
@@ -81,6 +89,8 @@ export class Runner {
     sweepIntervalMs: number;
     defaultTimeoutMs: number;
     heartbeatIntervalMs: number;
+    exitDrainMs: number;
+    exitDrainMaxMs: number;
     shell: string;
     now: () => number;
   };
@@ -98,6 +108,8 @@ export class Runner {
       sweepIntervalMs: init.sweepIntervalMs ?? DEFAULTS.sweepIntervalMs,
       defaultTimeoutMs: init.defaultTimeoutMs ?? DEFAULTS.defaultTimeoutMs,
       heartbeatIntervalMs: init.heartbeatIntervalMs ?? 0,
+      exitDrainMs: init.exitDrainMs ?? DEFAULTS.exitDrainMs,
+      exitDrainMaxMs: init.exitDrainMaxMs ?? DEFAULTS.exitDrainMaxMs,
       shell: init.shell ?? DEFAULTS.shell,
       now: init.now ?? Date.now,
     };
@@ -176,8 +188,22 @@ export class Runner {
     this.records.set(id, record);
 
     const onData = (name: "stdout" | "stderr") => (chunk: Buffer) => {
+      // A background job the command started inherits these pipes and
+      // can write to them after the exec has finished or been disposed.
+      // Its output has no subscriber and no log to go to, so it is
+      // dropped. This listener runs outside any caller, so a throw here
+      // would reach the process's uncaughtException handler, which
+      // exits the daemon.
+      if (!record.live) return;
       const value = new Uint8Array(chunk);
-      const seq = log.append(name, value);
+      let seq: number;
+      try {
+        seq = log.append(name, value);
+      } catch (err) {
+        record.subscriber?.error(err instanceof Error ? err : new Error(String(err)));
+        record.subscriber = undefined;
+        return;
+      }
       record.lastOutputAt = this.opts.now();
       record.subscriber?.enqueue({ id, seq, name, value });
     };
@@ -223,6 +249,19 @@ export class Runner {
         clearTimeout(record.heartbeatTimer);
         record.heartbeatTimer = undefined;
       }
+      if (record.drainTimer !== undefined) {
+        clearTimeout(record.drainTimer);
+        record.drainTimer = undefined;
+      }
+      if (record.drainDeadlineTimer !== undefined) {
+        clearTimeout(record.drainDeadlineTimer);
+        record.drainDeadlineTimer = undefined;
+      }
+      // Keep reading whatever a background job still writes, and drop
+      // it in onData. Left paused, its pipe fills and the job blocks on
+      // its next write. Closing the pipe instead would kill it with
+      // SIGPIPE.
+      flowStdio(record.child);
       const exitCode = mapExitCode(code, signal);
       let seq: number;
       try {
@@ -244,7 +283,43 @@ export class Runner {
       record.subscriber = undefined;
       this.scheduleSweep();
     };
-    child.once("exit", finalise);
+    // Finish the exec on "close", which Node emits once the child has
+    // exited and its stdout and stderr have both ended, so every byte it
+    // wrote is logged before the exit event. A background job that holds
+    // the pipes open delays "close" for as long as it runs, so "exit"
+    // starts a timer that finishes the exec without waiting for it. The
+    // timer waits while the subscriber has paused the pipes: their
+    // buffered output is still to come, and a reader that is keeping up
+    // will ask for it shortly. A reader that has stopped reading never
+    // will, so a second timer finishes the exec regardless, keeping what
+    // Node has already read from the pipes.
+    const drainAfterExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      const finish = (): void => {
+        if (!record.live) return;
+        readBufferedStdio(child);
+        finalise(code, signal);
+      };
+      const waitForReader = (): void => {
+        record.drainTimer = setTimeout(() => {
+          record.drainTimer = undefined;
+          if (record.subscriber?.paused === true) {
+            waitForReader();
+            return;
+          }
+          finish();
+        }, this.opts.exitDrainMs);
+      };
+      waitForReader();
+      record.drainDeadlineTimer = setTimeout(
+        () => {
+          record.drainDeadlineTimer = undefined;
+          finish();
+        },
+        Math.max(this.opts.exitDrainMs, this.opts.exitDrainMaxMs),
+      );
+    };
+    child.once("exit", drainAfterExit);
+    child.once("close", finalise);
     child.once("error", (err) => {
       if (!record.live) return;
       const value = new TextEncoder().encode(`spawn failed: ${err.message}\n`);
@@ -441,6 +516,15 @@ export class Runner {
       clearTimeout(record.heartbeatTimer);
       record.heartbeatTimer = undefined;
     }
+    if (record.drainTimer !== undefined) {
+      clearTimeout(record.drainTimer);
+      record.drainTimer = undefined;
+    }
+    if (record.drainDeadlineTimer !== undefined) {
+      clearTimeout(record.drainDeadlineTimer);
+      record.drainDeadlineTimer = undefined;
+    }
+    flowStdio(record.child);
     try {
       if (record.child.exitCode === null && record.child.signalCode === null) {
         record.child.kill("SIGKILL");
@@ -501,6 +585,26 @@ export class Runner {
 // metacharacters.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+// Hand the output Node has already read from the child's pipes to the
+// `data` listeners, which log it and pass it to the live subscriber.
+// `read()` emits `data` for each chunk it returns, paused or not.
+// Output still in the pipes is not waited for.
+function readBufferedStdio(child: ChildProcess): void {
+  for (const stream of [child.stdout, child.stderr]) {
+    if (stream === null) continue;
+    while (stream.read() !== null) {
+      // Each chunk has gone to the listeners.
+    }
+  }
+}
+
+// Resume the child's stdout and stderr after the exec is over, so a
+// background job still writing to them never blocks on a full pipe.
+function flowStdio(child: ChildProcess): void {
+  child.stdout?.resume();
+  child.stderr?.resume();
 }
 
 function mapExitCode(code: number | null, signal: NodeJS.Signals | null): number {

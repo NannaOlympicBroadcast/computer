@@ -1,5 +1,35 @@
 # @cloudflare/computer
 
+## 0.7.0
+
+### Minor Changes
+
+- [#238](https://github.com/cloudflare/computer/pull/238) Add experimental `onInterrupt: "restart" | "replay"` to `WorkerJavaScriptBackend`, so runs interrupted by a deploy or crash can resume. ([`22368fc`](https://github.com/cloudflare/computer/commit/22368fcde29759630561bf5cd439842f5b5f14ef)) - Thanks [@scuffi](https://github.com/scuffi)
+
+- [#251](https://github.com/cloudflare/computer/pull/251) Add experimental `ctx.interrupt()` for host module functions, with `runtime.pending()` and `runtime.respond()`, so a replayable run can wait for an answer such as an approval. ([`5db8dd4`](https://github.com/cloudflare/computer/commit/5db8dd4897c08c4aaf5342bfde5e0aa735eb6122)) - Thanks [@scuffi](https://github.com/scuffi)
+
+### Patch Changes
+
+- [#263](https://github.com/cloudflare/computer/pull/263) `WorkspaceFileStore` and `WORKSPACE_ROOT` are exported from `@cloudflare/computer`, so code outside the tools can read and write workspace files without its own helper. ([`a730798`](https://github.com/cloudflare/computer/commit/a730798b4ab93e7c4314225a76fb3f0bd1e3cb74)) - Thanks [@mattzcarey](https://github.com/mattzcarey)
+
+## 0.6.0
+
+### Minor Changes
+
+- [#255](https://github.com/cloudflare/computer/pull/255) `getWorkspace()` now returns a lazy client immediately which resolves on the first call. `useThink` and the Think compatibility methods are removed; `@cloudflare/think` 0.21 and later take a `Workspace` as it is. ([`9cc3119`](https://github.com/cloudflare/computer/commit/9cc31197d82697bd036cc527292ab39d01d4ffdb)) - Thanks [@mattzcarey](https://github.com/mattzcarey)
+
+- [#237](https://github.com/cloudflare/computer/pull/237) `WorkerJavaScriptBackend` keeps its Durable Object alive while executions run, and adds a `maxCpuMs` option. ([`7415a44`](https://github.com/cloudflare/computer/commit/7415a446b394a733b462917cc6660f2ebb2fd027)) - Thanks [@scuffi](https://github.com/scuffi)
+
+- [#239](https://github.com/cloudflare/computer/pull/239) `just-bash` is now an optional peer dependency and should be installed manually when using `@cloudflare/computer/backends/worker-shell`. ([`5980264`](https://github.com/cloudflare/computer/commit/5980264da104d310a2165b19b599804b589216ec)) - Thanks [@mattzcarey](https://github.com/mattzcarey)
+
+### Patch Changes
+
+- [#257](https://github.com/cloudflare/computer/pull/257) `getWorkspace()` accepts any Durable Object stub whose class has `__getWorkspaceStub()`, without a cast. ([`777097a`](https://github.com/cloudflare/computer/commit/777097a5d2ffdc78d7570c92cea673a58c950e8a)) - Thanks [@mattzcarey](https://github.com/mattzcarey)
+
+- [#244](https://github.com/cloudflare/computer/pull/244) `WorkspaceProxy` and `WorkspaceServiceProxy` wake their host Durable Object by name, so `ctx.id.name` survives a wake caused by a container or Dynamic Worker callback. `WorkspaceRef`, `WorkspaceProxyProps` and `WorkspaceServiceProxyProps` accept an optional `name`, filled in from `ctx.id.name` when the backend runs in the host object itself. ([`b629117`](https://github.com/cloudflare/computer/commit/b629117572315710b22a80c2da2d07d334121b8a)) - Thanks [@aron-cf](https://github.com/aron-cf)
+
+- [#241](https://github.com/cloudflare/computer/pull/241) `Workspace`, its filesystem, the worker-javascript backend, mounts, agent tools, Git, Assets, and Artifacts are now stable; `LegacyContainerBackend` is deprecated in favor of `ContainerBackend`; the container and worker-shell backends, `ws:container`, sync, and `computerd` stay experimental. ([`d950ffe`](https://github.com/cloudflare/computer/commit/d950ffee31788fa16c50960f58983a260a22f656)) - Thanks [@aron-cf](https://github.com/aron-cf)
+
 ## 0.5.1
 
 ### Patch Changes

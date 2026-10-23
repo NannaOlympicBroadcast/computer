@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/dofs",
-  "version": "0.5.1",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -38,7 +38,7 @@
     "@cloudflare/workers-types": "^4.20260616.1 || ^5.20260921.1",
     "tsdown": "^0.23.1",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "wrangler": "^4.148.0"
   }
 }

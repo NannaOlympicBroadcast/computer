@@ -92,7 +92,7 @@ async function runTurn(env: Env, id: DurableObjectId, prompt: string) {
 }
 ```
 
-Tools built from a client match tools built from the Workspace itself. The client answers `runtime.backends()` from a copy taken when it is created, so `exec` offers the same backends with the same descriptions, and `publish` appears only when the Workspace has an assets publisher. Dispose the client after the tools are done with it.
+Tools built from an awaited client match tools built from the Workspace itself. The client answers `runtime.backends()` from a copy taken when it loads, so `exec` offers the same backends with the same descriptions, and `publish` appears only when the Workspace has an assets publisher. A client you have not awaited reports no backends or assets, so tools built from it have no `exec` or `publish`. Dispose the client after the tools are done with it.
 
 ## pi
 
@@ -421,6 +421,8 @@ interface MutableFileStore extends FileStore {
 `lockIdentity` coordinates mutations across adapters that represent the same storage resource. Custom stores should share one identity when their instances can reach the same files.
 
 `WorkspaceFileStore` adapts the corresponding `workspace.fs` methods. Its chunk iterator opens one ranged `readFile` stream, so seeking to a byte continuation neither transfers the preceding content nor issues one RPC invocation per chunk.
+
+Code outside the tools can import `WorkspaceFileStore` from `@cloudflare/computer` without loading a tool library: `readAll` returns `null` for a missing file, and `write` creates parent directories. `WORKSPACE_ROOT` is the `/workspace` directory the backends and tools default to.
 
 ## Conventions for agents
 

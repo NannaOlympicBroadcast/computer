@@ -20,6 +20,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { Bash, type CustomCommand, type SecureFetch } from "just-bash";
 
+import { WORKSPACE_ROOT } from "../../workspace-root";
 import { WorkspaceFsAdapter } from "./adapter";
 import { type ArtifactsCommandHost, defineArtifactsCommand } from "./artifacts-command";
 import { type AssetsCommandHost, defineAssetsCommand } from "./assets-command";
@@ -110,7 +111,7 @@ export interface HostWorkspaceStub extends GitCommandHost, AssetsCommandHost {
   [Symbol.dispose]?: () => void;
 }
 
-const DEFAULT_CWD = "/workspace";
+const DEFAULT_CWD = WORKSPACE_ROOT;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 // Wire event shape. Matches @cloudflare/computer-rpc's ExecEvent

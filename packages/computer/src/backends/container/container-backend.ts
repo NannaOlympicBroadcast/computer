@@ -55,6 +55,7 @@ import {
   type WorkspaceEgressPolicy,
 } from "../../runtime/egress";
 import { WorkspaceTransportError } from "../../transport-failure";
+import { WORKSPACE_ROOT } from "../../workspace-root";
 import type { IWorkspaceContainerAPI, WorkspaceRef } from "./container-host";
 import type { ContainerInstanceSize, ContainerLaunchSpec } from "./container-launch-record";
 import { probeComputerdHealth } from "./health-probe";
@@ -329,7 +330,7 @@ export class ContainerBackend implements WorkspaceBackend {
 
     const env = {
       PORT: String(this.#options.containerPort),
-      MOUNT_POINT: "/workspace",
+      MOUNT_POINT: WORKSPACE_ROOT,
       ...(this.#options.ignore !== undefined
         ? { MOUNT_IGNORE: this.#options.ignore.join(",") }
         : {}),

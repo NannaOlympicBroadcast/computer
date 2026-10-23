@@ -12,12 +12,12 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { WorkerJavaScriptBackend } from "./backends/worker-javascript/worker-javascript";
-import { getWorkspace, type WorkspaceClient } from "./client";
+import { getWorkspace } from "./client";
 import type { WorkspaceBackendInfo } from "./runtime/runtime";
 import type { WorkspaceModuleBackend } from "./runtime/types";
 import { createAITools } from "./tools/ai-sdk/index";
 import { WORKSPACE, type WorkspaceStubHost } from "./with-workspace";
-import { type ThinkWorkspaceCompatibility, Workspace } from "./workspace";
+import { Workspace } from "./workspace";
 
 interface ExecCall {
   command: string;
@@ -95,7 +95,6 @@ function fakeRemote(): {
   let disposed = false;
   const stub = {
     fs: { marker: "fs" },
-    useThink: false,
     git: { marker: "git" },
     assets: undefined,
     artifacts: { marker: "artifacts" },
@@ -118,8 +117,10 @@ function fakeBrokenRemote(): {
 } {
   let disposed = false;
   const stub = {
-    get useThink(): boolean {
-      throw new Error("compatibility lookup failed");
+    runtime: {
+      backends(): never {
+        throw new Error("backend lookup failed");
+      },
     },
     [Symbol.dispose]() {
       disposed = true;
@@ -141,6 +142,121 @@ function fakeLocal(): { host: { [WORKSPACE]: Workspace }; calls: ExecCall[] } {
   return { calls, host: { [WORKSPACE]: ws } };
 }
 
+// A remote host that counts how often it is reached and can fail on
+// chosen attempts, for the lazy client tests.
+function countingRemote(failOn: number[] = []) {
+  const { runtime, calls } = fakeRuntime(true);
+  let reached = 0;
+  let disposed = 0;
+  const stub = {
+    fs: { stat: (path: string) => Promise.resolve({ path }) },
+    git: { cli: (input: unknown) => Promise.resolve({ input }) },
+    hasAssets: false,
+    artifacts: { list: () => Promise.resolve(["repo"]) },
+    runtime,
+    [Symbol.dispose]() {
+      disposed += 1;
+    },
+  };
+  const host: WorkspaceStubHost = {
+    __getWorkspaceStub: () => {
+      reached += 1;
+      if (failOn.includes(reached)) return Promise.reject(new Error("owner unavailable"));
+      return Promise.resolve(stub as never);
+    },
+  };
+  return { host, calls, reached: () => reached, disposed: () => disposed };
+}
+
+describe("getWorkspace — lazy client", () => {
+  it("returns a client without reaching the durable object", async () => {
+    const remote = countingRemote();
+    const ws = getWorkspace(remote.host);
+    expect(remote.reached()).toBe(0);
+    await expect(ws.fs.stat("/a")).resolves.toEqual({ path: "/a" });
+    expect(remote.reached()).toBe(1);
+  });
+
+  it("reaches the durable object once across calls", async () => {
+    const remote = countingRemote();
+    const ws = getWorkspace(remote.host);
+    await Promise.all([ws.fs.stat("/a"), ws.git.cli({ args: ["status"] }), ws.artifacts.list()]);
+    await ws.fs.stat("/b");
+    expect(remote.reached()).toBe(1);
+  });
+
+  it("looks up a handle from a function on the first call", async () => {
+    const remote = countingRemote();
+    let looked = 0;
+    const ws = getWorkspace(async () => {
+      looked += 1;
+      return remote.host;
+    });
+    expect(looked).toBe(0);
+    await expect(ws.fs.stat("/a")).resolves.toEqual({ path: "/a" });
+    await ws.fs.stat("/b");
+    expect(looked).toBe(1);
+  });
+
+  it("calls the function again after it fails", async () => {
+    const remote = countingRemote();
+    let looked = 0;
+    const ws = getWorkspace(() => {
+      looked += 1;
+      if (looked === 1) throw new Error("not a facet yet");
+      return remote.host;
+    });
+    await expect(ws.fs.stat("/a")).rejects.toThrow("not a facet yet");
+    await expect(ws.fs.stat("/a")).resolves.toEqual({ path: "/a" });
+    expect(looked).toBe(2);
+  });
+
+  it("tries again after a failed load", async () => {
+    const remote = countingRemote([1]);
+    const ws = getWorkspace(remote.host);
+    await expect(ws.fs.stat("/a")).rejects.toThrow("owner unavailable");
+    await expect(ws.fs.stat("/a")).resolves.toEqual({ path: "/a" });
+    expect(remote.reached()).toBe(2);
+  });
+
+  it("runs commands before it has loaded", async () => {
+    const remote = countingRemote();
+    const ws = getWorkspace(remote.host);
+    await ws.runtime.exec`cat ${"my file.txt"}`;
+    expect(remote.calls[0]?.command).toBe("cat 'my file.txt'");
+  });
+
+  it("reports no backends or assets until awaited", async () => {
+    const workspace = new Workspace({
+      storage: new SQLiteTestStorage(),
+      backends: [echoBackend()],
+    });
+    const lazy = getWorkspace({ __getWorkspaceStub: () => Promise.resolve(workspace.stub()) });
+    expect(lazy.runtime.backends()).toEqual([]);
+    expect(createAITools({ workspace: lazy }).exec).toBeUndefined();
+
+    const loaded = await lazy;
+    expect(loaded.runtime.backends()).toHaveLength(1);
+    expect(createAITools({ workspace: loaded }).exec).toBeDefined();
+    await workspace.close();
+  });
+
+  it("disposes the remote stub, and refuses calls, once disposed", async () => {
+    const remote = countingRemote();
+    const ws = getWorkspace(remote.host);
+    await ws.fs.stat("/a");
+    ws[Symbol.dispose]();
+    await Promise.resolve();
+    expect(remote.disposed()).toBe(1);
+    await expect(ws.fs.stat("/a")).rejects.toThrow("disposed");
+  });
+
+  it("does not look like a promise through its members", () => {
+    const ws = getWorkspace(countingRemote().host);
+    expect((ws.fs as unknown as { then?: unknown }).then).toBeUndefined();
+  });
+});
+
 describe("getWorkspace — remote dispatch", () => {
   it("calls __getWorkspaceStub and exposes the stub's members", async () => {
     const { host } = fakeRemote();
@@ -148,7 +264,6 @@ describe("getWorkspace — remote dispatch", () => {
     expect(ws.fs).toEqual({ marker: "fs" });
     expect(ws.git).toEqual({ marker: "git" });
     expect(ws.artifacts).toEqual({ marker: "artifacts" });
-    expect(ws).not.toHaveProperty("readFile");
   });
 
   it("streams through an asynchronous remote stream result", async () => {
@@ -188,25 +303,8 @@ describe("getWorkspace — remote dispatch", () => {
   it("disposes the remote stub when client initialization fails", async () => {
     const { host, disposed } = fakeBrokenRemote();
 
-    await expect(getWorkspace(host)).rejects.toThrow("compatibility lookup failed");
+    await expect(getWorkspace(host)).rejects.toThrow("backend lookup failed");
     expect(disposed()).toBe(true);
-  });
-
-  it("adds Think compatibility when the remote Workspace enables it", async () => {
-    const workspace = new Workspace({
-      storage: new SQLiteTestStorage(),
-      useThink: true,
-    });
-    await workspace.fs.writeFile("/notes.txt", "hello");
-    const host: WorkspaceStubHost = {
-      __getWorkspaceStub: () => Promise.resolve(workspace.stub()),
-    };
-
-    const client = (await getWorkspace(host)) as WorkspaceClient & ThinkWorkspaceCompatibility;
-
-    expect(client).toHaveProperty("readFile");
-    await expect(client.readFile("/notes.txt")).resolves.toBe("hello");
-    await expect(client.readFile("/missing.txt")).resolves.toBeNull();
   });
 });
 
@@ -216,27 +314,12 @@ describe("getWorkspace — local dispatch", () => {
     const ws = await getWorkspace(host);
     await ws.runtime.exec`cat ${"my file.txt"}`;
     expect(calls[0].command).toBe("cat 'my file.txt'");
-    expect(ws).not.toHaveProperty("readFile");
   });
 
   it("does not throw on dispose (the durable object owns the lifecycle)", async () => {
     const { host } = fakeLocal();
     const ws = await getWorkspace(host);
     expect(() => ws[Symbol.dispose]()).not.toThrow();
-  });
-
-  it("adds Think compatibility when the local Workspace enables it", async () => {
-    const workspace = new Workspace({
-      storage: new SQLiteTestStorage(),
-      useThink: true,
-    });
-    const host = { [WORKSPACE]: workspace };
-    const { runtime } = fakeRuntime();
-    Object.defineProperty(workspace, "runtime", { get: () => runtime });
-
-    const client = (await getWorkspace(host)) as WorkspaceClient & ThinkWorkspaceCompatibility;
-
-    expect(client).toHaveProperty("readFile");
   });
 });
 

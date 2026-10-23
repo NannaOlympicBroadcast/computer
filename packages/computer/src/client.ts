@@ -12,7 +12,9 @@
 // with-workspace.ts), which stashes the Workspace under a private
 // symbol and exposes the `__getWorkspaceStub` prototype method.
 //
-// `getWorkspace` dispatches on what it's handed:
+// `getWorkspace` returns a client straight away and loads it on the
+// first call, so it can be assigned to a class field; awaiting it gives
+// the loaded client. Loading dispatches on what it's handed:
 //
 //   - Local host (`this`): the symbol stash holds a `Workspace`.
 //     Detected with `instanceof`, so the decision doesn't depend on
@@ -43,7 +45,7 @@ import { decodeRuntimeEvents } from "./runtime/wire";
 import { type ShellValue, sh } from "./sh";
 import type { ExecEncoding } from "./shell";
 import { WORKSPACE, type WorkspaceStubHost } from "./with-workspace";
-import { createThinkCompatibility, type ThinkWorkspaceCompatibility, Workspace } from "./workspace";
+import { Workspace } from "./workspace";
 
 // The remote runtime handle stub: a result / stream / kill surface
 // carried across Workers RPC.
@@ -333,7 +335,7 @@ function withExecutionId(
 // `fs`, `git`, `artifacts`, and `assets` are the underlying surface's
 // members, passed through. The filesystem stub mirrors the local
 // filesystem, so it also serves as the common client type.
-export interface WorkspaceClient extends Partial<ThinkWorkspaceCompatibility> {
+export interface WorkspaceClient {
   readonly fs: WorkspaceFilesystem;
   readonly runtime: WorkspaceRuntimeClient;
   // oxlint-disable-next-line typescript/no-explicit-any -- git type differs local vs remote
@@ -350,7 +352,6 @@ function makeClient(
   surface: any,
   rehydrate: (handle: unknown, metadata?: RuntimeHandleMetadata) => unknown,
   dispose: () => void,
-  useThink: boolean,
   backends: readonly WorkspaceBackendInfo[],
   hasAssets: boolean,
 ): WorkspaceClient {
@@ -359,7 +360,7 @@ function makeClient(
     rehydrate as RehydrateRuntimeHandle,
     backends,
   );
-  const client: WorkspaceClient = {
+  return {
     get fs() {
       return surface.fs;
     },
@@ -377,16 +378,104 @@ function makeClient(
     },
     [Symbol.dispose]: dispose,
   };
-  if (useThink) Object.assign(client, createThinkCompatibility(client.fs));
-  return client;
 }
 
 // What `getWorkspace` accepts: a local host carrying the symbol stash
-// (the durable object `this`), or a remote stub exposing
-// `__getWorkspaceStub`.
-export type WorkspaceHandle = { [WORKSPACE]?: unknown } | WorkspaceStubHost;
+// (the durable object `this`), or anything exposing `__getWorkspaceStub`,
+// such as a Durable Object stub. A stub types the method's result as an
+// RPC stub of `WorkspaceStub`, not `WorkspaceStub` itself, so the result
+// is not checked here.
+export type WorkspaceHandle =
+  | { [WORKSPACE]?: unknown }
+  | { __getWorkspaceStub(): PromiseLike<unknown> };
 
-export async function getWorkspace(handle: WorkspaceHandle): Promise<WorkspaceClient> {
+// The methods of `T` that return a promise. A lazy client forwards
+// those before it has loaded; plain properties have to wait for it.
+type AsyncMethods<T> = {
+  [K in keyof T as T[K] extends (...args: never[]) => PromiseLike<unknown> ? K : never]: T[K];
+};
+
+/**
+ * What `getWorkspace` returns. Use it straight away: the durable object
+ * is reached on the first call, and once per client. Await it for the
+ * loaded client, which also knows the Workspace's backends and assets.
+ */
+export interface LazyWorkspaceClient extends PromiseLike<WorkspaceClient> {
+  readonly fs: AsyncMethods<WorkspaceFilesystem>;
+  /** `backends()` is empty until the client is awaited. */
+  readonly runtime: WorkspaceRuntimeClient;
+  // oxlint-disable-next-line typescript/no-explicit-any -- git type differs local vs remote
+  readonly git: any;
+  // oxlint-disable-next-line typescript/no-explicit-any -- artifacts type differs local vs remote
+  readonly artifacts: any;
+  /** Undefined until the client is awaited. */
+  readonly assets: undefined;
+  [Symbol.dispose](): void;
+}
+
+/**
+ * Where a lazy client finds its Workspace: a handle, or a function that
+ * returns one. A function runs on the first call, and again after a
+ * failed load, so it can use state that is only ready later, such as
+ * an agent's parent.
+ */
+export type WorkspaceSource =
+  | WorkspaceHandle
+  | (() => WorkspaceHandle | PromiseLike<WorkspaceHandle>);
+
+const NO_BACKENDS: readonly WorkspaceBackendInfo[] = Object.freeze([]);
+
+export function getWorkspace(source: WorkspaceSource): LazyWorkspaceClient {
+  let loading: Promise<WorkspaceClient> | undefined;
+  let disposed = false;
+  const load = (): Promise<WorkspaceClient> => {
+    if (disposed) return Promise.reject(new Error("workspace client is disposed"));
+    // A failed load is dropped, so the next call tries again.
+    loading ??= Promise.resolve()
+      .then(() => (typeof source === "function" ? source() : source))
+      .then(loadWorkspace)
+      .catch((error: unknown) => {
+        loading = undefined;
+        throw error;
+      });
+    return loading;
+  };
+  // Each member forwards its methods to the loaded client, apart from
+  // the ones in `own`. `then` stays undefined, or awaiting a member
+  // would treat it as a promise.
+  const forward = (member: "fs" | "runtime" | "git" | "artifacts", own: object = {}) =>
+    new Proxy(own, {
+      get: (target, name) => {
+        if (name in target) return (target as Record<string | symbol, unknown>)[name];
+        if (typeof name === "symbol" || name === "then") return undefined;
+        return (...args: unknown[]) => load().then((client) => client[member][name](...args));
+      },
+    });
+  return {
+    fs: forward("fs") as AsyncMethods<WorkspaceFilesystem>,
+    // Backends are unknown until loaded. Reporting none keeps tool sets
+    // built from this client the same before and after the first call.
+    runtime: forward("runtime", { backends: () => NO_BACKENDS }) as WorkspaceRuntimeClient,
+    git: forward("git"),
+    assets: undefined,
+    artifacts: forward("artifacts"),
+    [Symbol.dispose]() {
+      disposed = true;
+      void loading?.then(
+        (client) => client[Symbol.dispose](),
+        () => undefined,
+      );
+    },
+    // Thenable on purpose, like an `RpcPromise`: `await getWorkspace(x)`
+    // keeps returning the loaded client it always returned.
+    // oxlint-disable-next-line unicorn/no-thenable -- see above
+    then(onFulfilled, onRejected) {
+      return load().then(onFulfilled, onRejected);
+    },
+  };
+}
+
+async function loadWorkspace(handle: WorkspaceHandle): Promise<WorkspaceClient> {
   const local = (handle as { [WORKSPACE]?: unknown })[WORKSPACE];
   if (local instanceof Workspace) {
     // Local path: delegate straight to the in-isolate Workspace.
@@ -406,7 +495,6 @@ export async function getWorkspace(handle: WorkspaceHandle): Promise<WorkspaceCl
       // Local handle is already a host ExecHandle — pass it through.
       (h) => h,
       () => {},
-      local.useThink,
       local.runtime.backends(),
       local.assets !== undefined,
     );
@@ -422,8 +510,6 @@ export async function getWorkspace(handle: WorkspaceHandle): Promise<WorkspaceCl
       () => {
         (stub as { [Symbol.dispose]?: () => void })[Symbol.dispose]?.();
       },
-      // oxlint-disable-next-line typescript/await-thenable -- a promise over RPC
-      await stub.useThink,
       // oxlint-disable-next-line typescript/await-thenable -- a promise over RPC
       await stub.runtime.backends(),
       // oxlint-disable-next-line typescript/await-thenable -- a promise over RPC
