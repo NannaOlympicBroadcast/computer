@@ -211,6 +211,7 @@ async function addonCacheKey(target) {
     "fuse-native.c",
     "removal-guard.c",
     "removal-guard.h",
+    "confined-bind.c",
     "binding.gyp",
     "scripts/fuse-config.js",
     "package.json",

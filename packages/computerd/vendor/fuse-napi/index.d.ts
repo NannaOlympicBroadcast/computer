@@ -714,6 +714,12 @@ declare class Fuse {
 
   /** FUSE capability bit for passthrough, for use with `want`. */
   public static CAP_PASSTHROUGH: number;
+  /** Confined native-root bind; zero or a negative Linux errno. Never use path-based fallback. */
+  public static bindRoot: (sourceRoot: string, targetRoot: string, relativePath: string) => Promise<number>;
+  /** Lazily detach a target resolved beneath a pinned mount root. */
+  public static unbindRoot: (targetRoot: string, relativePath: string) => Promise<number>;
+  /** Open a directory beneath a pinned root; nonnegative descriptor or negative errno. */
+  public static openRoot: (targetRoot: string, relativePath: string) => Promise<number>;
   /** Not upstream; see PATCHES.md. */
   public static removalGuard: {
     start(onDetached: (path: string) => void): number;

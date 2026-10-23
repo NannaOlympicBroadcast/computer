@@ -28,19 +28,10 @@
 // thread may touch a path under MOUNT_POINT. Resolving such a path sends
 // FUSE requests that this same thread has to answer, so a synchronous
 // call there deadlocks the daemon. Paths under the backing root and
-// /proc are fine. mount and umount run as child processes, and the one
-// stat of a mounted target goes through the libuv thread pool.
+// /proc are fine. The native worker resolves and mounts the target off
+// the main thread, using pinned directory descriptors.
 
-import { spawn } from "node:child_process";
-import {
-  closeSync,
-  constants as fsConstants,
-  lstatSync,
-  open as openCallback,
-  readdirSync,
-  readFileSync,
-  promises as fsPromises,
-} from "node:fs";
+import { closeSync, lstatSync, readdirSync, readFileSync, promises as fsPromises } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { MountIgnoreSet } from "./ignore.js";
@@ -58,10 +49,11 @@ export interface NativeRootsOptions {
    */
   readonly active?: () => boolean;
   /** Injected for tests. Each seam defaults to the real system. */
-  readonly run?: (argv: readonly string[]) => Promise<number>;
+  /** Native operation: resolves both directories beneath pinned roots before binding. */
+  readonly bindRoot?: (sourceRoot: string, targetRoot: string, rel: string) => Promise<number>;
+  readonly unbindRoot?: (targetRoot: string, rel: string) => Promise<number>;
   readonly mountinfo?: () => string;
   readonly lstat?: (path: string) => { isDirectory(): boolean; dev: number; ino: number };
-  readonly stat?: (path: string) => Promise<{ dev: number; ino: number }>;
   /** Asynchronous lstat of a path under the mount point. */
   readonly lstatTarget?: (path: string) => Promise<{ isDirectory(): boolean }>;
   readonly readdir?: (path: string) => string[];
@@ -132,10 +124,22 @@ export interface NativeRoots {
 export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
   const root = trimTrailing(options.root);
   const mountPoint = trimTrailing(options.mountPoint) || "/";
-  const run = options.run ?? runCommand;
+  const unbindRoot =
+    options.unbindRoot ??
+    (async (targetRoot: string, rel: string) => {
+      const { default: Fuse } = await import("fuse-napi");
+      if (typeof Fuse.unbindRoot !== "function") return -38;
+      return Fuse.unbindRoot(targetRoot, rel);
+    });
+  const bindRoot =
+    options.bindRoot ??
+    (async (sourceRoot: string, targetRoot: string, rel: string) => {
+      const { default: Fuse } = await import("fuse-napi");
+      if (typeof Fuse.bindRoot !== "function") return -38; // ENOSYS; never fall back to path mount.
+      return Fuse.bindRoot(sourceRoot, targetRoot, rel);
+    });
   const readMountinfo = options.mountinfo ?? (() => readFileSync("/proc/self/mountinfo", "utf8"));
   const lstat = options.lstat ?? ((path: string) => lstatSync(path));
-  const stat = options.stat ?? ((path: string) => fsPromises.stat(path));
   const lstatTarget = options.lstatTarget ?? ((path: string) => fsPromises.lstat(path));
   const readdir = options.readdir ?? ((path: string) => readdirSync(path));
   const warn = options.warn ?? ((message: string) => console.warn(message));
@@ -153,15 +157,13 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
   let guard: RemovalGuard | undefined;
   const openDirectory =
     options.openDirectory ??
-    ((path: string) =>
-      new Promise<number>((resolve, reject) => {
-        // The callback form, for a raw descriptor the guard can own; a
-        // FileHandle would close itself when collected.
-        openCallback(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY, (error, fd) => {
-          if (error) reject(error);
-          else resolve(fd);
-        });
-      }));
+    (async (path: string) => {
+      const { default: Fuse } = await import("fuse-napi");
+      if (typeof Fuse.openRoot !== "function") throw new Error("confined open unavailable");
+      const fd = await Fuse.openRoot(mountPoint, stripSlashes(path.slice(mountPoint.length)));
+      if (fd < 0) throw new Error(`confined open failed (${fd})`);
+      return fd;
+    });
 
   // Through the thread pool: the target is under the mount.
   const registerWithGuard = async (target: string): Promise<void> => {
@@ -236,7 +238,7 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
   async function mountOne(rel: string): Promise<void> {
     const source = sourceOf(rel);
     const target = targetOf(rel);
-    let sourceStat: { isDirectory(): boolean; dev: number; ino: number };
+    let sourceStat: { isDirectory(): boolean };
     try {
       // lstat, so a symlink at the root path is never mounted over.
       sourceStat = lstat(source);
@@ -258,30 +260,18 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
     // it could be removed. Mounting now would put it back under them.
     if (parked.has(rel)) return;
 
-    const bound = await run(["mount", "--bind", source, target]);
+    // The addon resolves both paths beneath pinned directory descriptors and
+    // attaches a private cloned mount with move_mount. A JavaScript realpath
+    // precheck or an external mount command cannot close this race.
+    const bound = await bindRoot(root, mountPoint, rel);
     if (bound !== 0) {
-      // Removed while the mount was on its way, as `rm -rf` does right
-      // after a lookup. Gone is not refused.
-      if (!(await stillThere(source, target))) return;
-      recordFailure(rel, `mount --bind exited ${bound}`);
+      if (bound === -2 && !(await stillThere(source, target))) return; // ENOENT race
+      recordFailure(rel, `confined bind failed (${bound})`);
       return;
     }
-    // Keep the mount out of any shared peer group the container runtime
-    // set up, so it never propagates beyond this namespace.
-    await run(["mount", "--make-private", target]);
-
-    try {
-      const mounted = await stat(target);
-      if (mounted.dev !== sourceStat.dev || mounted.ino !== sourceStat.ino) {
-        await run(["umount", "-l", target]);
-        recordFailure(rel, "the mounted directory is not the backing directory");
-        return;
-      }
-    } catch (error) {
-      await run(["umount", "-l", target]);
-      recordFailure(rel, `could not verify the mount: ${String(error)}`);
-      return;
-    }
+    // The helper checked the detached clone's identity before attaching it
+    // through the pinned target descriptor. A rename can move that mount
+    // after it returns; mountinfo then lists the new path.
     mounts += 1;
     await registerWithGuard(target);
   }
@@ -316,7 +306,13 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
       if (isRoot(child)) {
         visit(child);
       } else if (!options.ignore.ignores(child)) {
-        walk(child, visit);
+        try {
+          // A synced scaffold can be a symlink after restore. Never scan
+          // through it into an unrelated directory (or a symlink cycle).
+          if (lstat(sourceOf(child)).isDirectory()) walk(child, visit);
+        } catch {
+          // Removed or changed during the scan. The next lookup can retry.
+        }
       }
     }
   };
@@ -328,7 +324,7 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
       // Closes the guard's descriptor, which would otherwise keep the
       // detached mount alive.
       guard?.removeRoot(target);
-      if ((await run(["umount", "-l", target])) === 0) {
+      if ((await unbindRoot(mountPoint, relOf(target))) === 0) {
         detaches += 1;
         detached.push(target);
       }
@@ -381,19 +377,6 @@ export function unescapeMountinfo(field: string): string {
   return field.replace(/\\([0-7]{3})/g, (_, octal: string) =>
     String.fromCharCode(Number.parseInt(octal, 8)),
   );
-}
-
-function runCommand(argv: readonly string[]): Promise<number> {
-  return new Promise((resolve) => {
-    const [command, ...args] = argv;
-    if (command === undefined) {
-      resolve(127);
-      return;
-    }
-    const child = spawn(command, args, { stdio: "ignore" });
-    child.once("error", () => resolve(127));
-    child.once("exit", (code) => resolve(code ?? 1));
-  });
 }
 
 function parentOf(rel: string): string {

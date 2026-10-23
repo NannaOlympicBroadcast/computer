@@ -352,8 +352,13 @@ whose parent is synced: `packages/app/node_modules` is one, the
 file pattern such as `**/*.tsbuildinfo` never is.
 
 The content is the same either way. A mount only changes how fast a path
-is served, so a mount that fails, lands late, or is removed is never a
-problem for what a command sees.
+is served, so a mount that fails, lands late, or is removed falls back to
+FUSE. The native addon resolves the source and target beneath pinned
+root-directory descriptors, rejects symlinks in every path component,
+clones a private mount, and attaches it to the pinned target. It does not
+pass user-controlled paths to a mount command. If the helper is unavailable
+or rejects a path, it does not attempt a path-based bind. Check
+`/__computerd/info` for the most recent failed bind.
 
 Roots are mounted when they appear, with no watcher:
 
@@ -367,8 +372,10 @@ Roots are mounted when they appear, with no watcher:
 - At startup, for roots already on disk.
 
 Native roots need FUSE passthrough to be negotiated (Linux 6.9 or newer),
-`CAP_SYS_ADMIN`, and `mount` from util-linux in the image. Without any
-of these, local-only paths are served through FUSE as described above.
+`CAP_SYS_ADMIN`, a kernel with `openat2`, `open_tree`, and `move_mount`, and
+the bundled native helper. Without these, local-only paths are served
+through FUSE as described above. Native roots do not need util-linux
+`mount`; the addon makes the mount system calls itself.
 `COMPUTERD_FUSE_NATIVE_ROOTS=0` turns them off, for ruling them in or out
 while chasing a problem.
 

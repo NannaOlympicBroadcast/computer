@@ -18,7 +18,8 @@
     "libraries": [],
     "sources": [
       "fuse-native.c",
-      "removal-guard.c"
+      "removal-guard.c",
+      "confined-bind.c"
     ],
     'defines': [
       '_FILE_OFFSET_BITS=64'

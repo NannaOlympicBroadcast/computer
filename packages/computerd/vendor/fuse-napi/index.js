@@ -1689,6 +1689,15 @@ for (const [name, value] of Object.entries(os.constants.errno)) {
 // Not upstream; see PATCHES.md. Pauses rmdir/rename of registered paths
 // for this process's threads and children long enough to lazily detach the
 // mount on them. Each call returns 0 or a negative errno.
+// The native worker resolves source and target beneath pinned directories.
+// Never fall back to the path-based mount command if this binding is absent.
+Fuse.bindRoot = (sourceRoot, targetRoot, relativePath) =>
+  binding.fuse_native_bind_root(sourceRoot, targetRoot, relativePath)
+Fuse.unbindRoot = (targetRoot, relativePath) =>
+  binding.fuse_native_unbind_root(targetRoot, relativePath)
+Fuse.openRoot = (targetRoot, relativePath) =>
+  binding.fuse_native_open_root(targetRoot, relativePath)
+
 Fuse.removalGuard = Object.freeze({
   start (onDetached) {
     if (typeof onDetached !== 'function') throw new TypeError('removalGuard.start requires a callback')

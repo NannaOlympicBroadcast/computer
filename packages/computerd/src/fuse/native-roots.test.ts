@@ -15,8 +15,7 @@ interface Harness {
 
 /**
  * A fake system: `dirs` is the backing tree (paths relative to ROOT),
- * `mount --bind` adds the target to the fake mount table, and the mounted
- * target stats as its source unless `mismatch` is set.
+ * A confined bind adds the target to the fake mount table.
  */
 function harness(
   options: {
@@ -42,13 +41,16 @@ function harness(
   const inode = (path: string) => path.length;
 
   const seams: Partial<NativeRootsOptions> = {
-    run: async (argv) => {
-      commands.push([...argv]);
-      if (argv[0] === "mount" && argv[1] === "--bind") {
-        if ((options.mountExit ?? 0) !== 0) return options.mountExit as number;
-        mounted.add(argv[3] as string);
-      }
-      if (argv[0] === "umount") mounted.delete(argv[2] as string);
+    unbindRoot: async (target, rel) => {
+      commands.push(["unbindRoot", target, rel]);
+      mounted.delete(`${target}/${rel}`);
+      return 0;
+    },
+    bindRoot: async (source, target, rel) => {
+      commands.push(["bindRoot", source, target, rel]);
+      if (options.mismatch) return -5; // Native verification failed before returning.
+      if (options.mountExit) return -options.mountExit;
+      mounted.add(`${target}/${rel}`);
       return 0;
     },
     mountinfo: () =>
@@ -69,10 +71,6 @@ function harness(
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }
       return { isDirectory: () => true };
-    },
-    stat: async (path) => {
-      const source = `${ROOT}${path.slice(MOUNT.length)}`;
-      return { dev: 1, ino: options.mismatch ? 0 : inode(source) };
     },
     readdir: (path) => {
       const prefix = path === ROOT ? "" : `${rel(path)}/`;
@@ -133,10 +131,7 @@ describe("ensure", () => {
     const { roots, commands, mounted } = harness({ dirs: ["app/node_modules"] });
     roots.ensure("app/node_modules");
     await roots.settled();
-    expect(commands).toEqual([
-      ["mount", "--bind", `${ROOT}/app/node_modules`, `${MOUNT}/app/node_modules`],
-      ["mount", "--make-private", `${MOUNT}/app/node_modules`],
-    ]);
+    expect(commands).toEqual([["bindRoot", ROOT, MOUNT, "app/node_modules"]]);
     expect([...mounted]).toEqual([`${MOUNT}/app/node_modules`]);
     expect(roots.stats()).toMatchObject({ active: 1, mounts: 1, failures: 0 });
   });
@@ -173,7 +168,7 @@ describe("ensure", () => {
     roots.ensure("node_modules");
     roots.ensure("/node_modules/");
     await roots.settled();
-    expect(commands.filter((argv) => argv[1] === "--bind")).toHaveLength(1);
+    expect(commands.filter((argv) => argv[0] === "bindRoot")).toHaveLength(1);
   });
 
   test("an already mounted root is left alone", async () => {
@@ -182,7 +177,16 @@ describe("ensure", () => {
     await roots.settled();
     roots.ensure("node_modules");
     await roots.settled();
-    expect(commands.filter((argv) => argv[1] === "--bind")).toHaveLength(1);
+    expect(commands.filter((argv) => argv[0] === "bindRoot")).toHaveLength(1);
+  });
+
+  test("an unavailable native helper never falls back to a path-based mount", async () => {
+    const { roots, commands, mounted } = harness({ dirs: ["node_modules"], mountExit: 38 });
+    roots.ensure("node_modules");
+    await roots.settled();
+    expect(commands).toEqual([["bindRoot", ROOT, MOUNT, "node_modules"]]);
+    expect(mounted.size).toBe(0);
+    expect(roots.stats()).toMatchObject({ mounts: 0, failures: 1 });
   });
 
   test("a refused mount is counted and warned about once", async () => {
@@ -194,7 +198,7 @@ describe("ensure", () => {
     roots.ensure("b/node_modules");
     await roots.settled();
     expect(roots.stats()).toMatchObject({ active: 0, mounts: 0, failures: 2 });
-    expect(roots.stats().lastFailure).toContain("exited 32");
+    expect(roots.stats().lastFailure).toContain("failed (-32)");
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("serving it through FUSE instead");
   });
@@ -206,7 +210,7 @@ describe("ensure", () => {
     h.roots.ensure("node_modules");
     h.roots.ensure("node_modules", false);
     await h.roots.settled();
-    const binds = () => h.commands.filter((argv) => argv[1] === "--bind").length;
+    const binds = () => h.commands.filter((argv) => argv[0] === "bindRoot").length;
     expect(binds()).toBe(1);
     h.roots.ensure("node_modules", true);
     await h.roots.settled();
@@ -230,11 +234,11 @@ describe("ensure", () => {
     expect(roots.stats()).toMatchObject({ active: 1, mounts: 1 });
   });
 
-  test("a mount that does not show the backing directory is detached", async () => {
+  test("a native verification failure leaves no mount", async () => {
     const { roots, commands, mounted } = harness({ dirs: ["node_modules"], mismatch: true });
     roots.ensure("node_modules");
     await roots.settled();
-    expect(commands.at(-1)).toEqual(["umount", "-l", `${MOUNT}/node_modules`]);
+    expect(commands).toEqual([["bindRoot", ROOT, MOUNT, "node_modules"]]);
     expect(mounted.size).toBe(0);
     expect(roots.stats()).toMatchObject({ mounts: 0, failures: 1 });
   });
@@ -249,11 +253,21 @@ describe("ensure", () => {
     on = true;
     roots.ensure("node_modules");
     await roots.settled();
-    expect(commands).toHaveLength(2);
+    expect(commands).toHaveLength(1);
   });
 });
 
 describe("scan", () => {
+  test("scan does not descend through a symlink in the backing tree", async () => {
+    const { roots, commands } = harness({
+      symlinks: ["q"],
+      dirs: ["q/node_modules"],
+    });
+    roots.scan();
+    await roots.settled();
+    expect(commands).toEqual([]);
+  });
+
   test("scan mounts every existing root without descending into one", async () => {
     const readdirs: string[] = [];
     const h = harness({
@@ -268,13 +282,12 @@ describe("scan", () => {
       root: ROOT,
       mountPoint: MOUNT,
       ignore: resolveMountIgnore(["**/node_modules", "/dist"], MOUNT),
-      run: async (argv) => {
-        h.commands.push([...argv]);
+      bindRoot: async (source, target, rel) => {
+        h.commands.push(["bindRoot", source, target, rel]);
         return 0;
       },
       mountinfo: () => "",
       lstat: () => ({ isDirectory: () => true, dev: 1, ino: 1 }),
-      stat: async () => ({ dev: 1, ino: 1 }),
       lstatTarget: async () => ({ isDirectory: () => true }),
       readdir: (path) => {
         readdirs.push(path);
@@ -290,7 +303,9 @@ describe("scan", () => {
     });
     roots.scan();
     await roots.settled();
-    const bound = h.commands.filter((argv) => argv[1] === "--bind").map((argv) => argv[3]);
+    const bound = h.commands
+      .filter((argv) => argv[0] === "bindRoot")
+      .map((argv) => `${MOUNT}/${argv[3]}`);
     expect(bound.sort()).toEqual([
       `${MOUNT}/dist`,
       `${MOUNT}/node_modules`,
@@ -338,7 +353,7 @@ describe("parking", () => {
       root: ROOT,
       mountPoint: MOUNT,
       ignore: resolveMountIgnore(["**/node_modules"], MOUNT),
-      run: async (argv) => (argv[1] === "--bind" ? 32 : 0),
+      bindRoot: async () => -2,
       mountinfo: () => "",
       lstat: () => ({ isDirectory: () => true, dev: 1, ino: 1 }),
       lstatTarget: async () => {
@@ -346,7 +361,6 @@ describe("parking", () => {
         if (checks > 1) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
         return { isDirectory: () => true };
       },
-      stat: async () => ({ dev: 1, ino: 1 }),
       warn: (message) => h.warnings.push(message),
     });
     roots.ensure("node_modules");
@@ -430,8 +444,8 @@ describe("removal guard", () => {
       root: ROOT,
       mountPoint: MOUNT,
       ignore: resolveMountIgnore(["**/node_modules"], MOUNT),
-      run: async (argv) => {
-        commands.push([...argv]);
+      bindRoot: async (source, target, rel) => {
+        commands.push(["bindRoot", source, target, rel]);
         return 0;
       },
       mountinfo: () => "",
@@ -440,7 +454,6 @@ describe("removal guard", () => {
         await gate;
         return { isDirectory: () => true };
       },
-      stat: async () => ({ dev: 1, ino: 1 }),
     });
     roots.ensure("node_modules");
     roots.guardDetached(`${MOUNT}/node_modules`);
@@ -460,8 +473,8 @@ describe("detach", () => {
     const detached = await roots.detachAll();
     expect(detached).toEqual([`${MOUNT}/a/b/node_modules`, `${MOUNT}/a/node_modules`]);
     expect(commands).toEqual([
-      ["umount", "-l", `${MOUNT}/a/b/node_modules`],
-      ["umount", "-l", `${MOUNT}/a/node_modules`],
+      ["unbindRoot", MOUNT, "a/b/node_modules"],
+      ["unbindRoot", MOUNT, "a/node_modules"],
     ]);
     expect(mounted.size).toBe(0);
     expect(roots.stats()).toMatchObject({ active: 0, detaches: 2 });

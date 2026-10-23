@@ -509,6 +509,23 @@ describeIfReal("native roots across restarts", () => {
     expect((await nativeInfo(restored)).active).toBe(0);
   }, 120_000);
 
+  test("refuses a symlink in a backing root ancestor", async (ctx) => {
+    const b = await boot({ MOUNT_IGNORE: IGNORE });
+    started.push(b);
+    if (!(await nativeInfo(b)).enabled) ctx.skip();
+    const setup = sh(
+      b,
+      "mkdir -p z /opt/victim/node_modules && " +
+        "echo original > /opt/victim/node_modules/marker && " +
+        "rm -rf /tmp/workspace/z && ln -s /opt/victim /tmp/workspace/z && " +
+        "test -f z/node_modules/marker",
+    );
+    expect(setup.code).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(mounts(b)).not.toContain("/workspace/z/node_modules");
+    expect(sh(b, "cat /opt/victim/node_modules/marker").stdout).toBe("original\n");
+  }, 30_000);
+
   test("with an in-memory store, a root mounts on first lookup once its parent is back", async (ctx) => {
     // The VFS starts empty and the host pushes synced directories back
     // later, so at startup there is nothing to mount onto yet.

@@ -14,6 +14,9 @@
 #include <node_api.h>
 #include <napi-macros.h>
 #include "removal-guard.h"
+napi_value fuse_native_bind_root(napi_env env, napi_callback_info info);
+napi_value fuse_native_unbind_root(napi_env env, napi_callback_info info);
+napi_value fuse_native_open_root(napi_env env, napi_callback_info info);
 
 #include <string.h>
 #include <stdio.h>
@@ -4125,6 +4128,9 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(fuse_native_guard_add_root)
   NAPI_EXPORT_FUNCTION(fuse_native_guard_remove_root)
   NAPI_EXPORT_FUNCTION(fuse_native_guard_stats)
+  NAPI_EXPORT_FUNCTION(fuse_native_bind_root)
+  NAPI_EXPORT_FUNCTION(fuse_native_unbind_root)
+  NAPI_EXPORT_FUNCTION(fuse_native_open_root)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_open)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_opendir)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_read)
