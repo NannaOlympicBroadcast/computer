@@ -11,11 +11,11 @@
 // - A mount that lands late, fails, or is detached changes how a path is
 //   served, never what it contains. Nothing here is on a correctness
 //   path, so every failure is "leave it to the FUSE layer".
-// - /proc/self/mountinfo is the only state. Anything mounted strictly
-//   under MOUNT_POINT was mounted by this module, so there is no registry
-//   to write, recover, or get out of step.
-// - A lazy detach is always safe: the detached tree is the same backing
-//   directory the FUSE layer serves, and it is never synced.
+// - /proc/self/mountinfo is the only mount state. This module treats every
+//   mount strictly below MOUNT_POINT as a native root, including at restart.
+//   Other code must not create mounts there: detachAll would detach them.
+// - Lazily detaching one of our native roots leaves the same backing
+//   directory served through FUSE. This does not apply to unrelated mounts.
 // - Removing or renaming a root itself fails with EBUSY in the kernel. For
 //   commands computerd runs, the removal guard (vendor/fuse-napi,
 //   removal-guard.c) detaches the mount first; this module hands it each
@@ -31,7 +31,7 @@
 // /proc are fine. The native worker resolves and mounts the target off
 // the main thread, using pinned directory descriptors.
 
-import { closeSync, lstatSync, readdirSync, readFileSync, promises as fsPromises } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, promises as fsPromises } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { MountIgnoreSet } from "./ignore.js";
@@ -48,8 +48,7 @@ export interface NativeRootsOptions {
    * FUSE mount exists and switch it on once passthrough is negotiated.
    */
   readonly active?: () => boolean;
-  /** Injected for tests. Each seam defaults to the real system. */
-  /** Native operation: resolves both directories beneath pinned roots before binding. */
+  /** Native operation; injected in tests. Defaults to the confined addon. */
   readonly bindRoot?: (sourceRoot: string, targetRoot: string, rel: string) => Promise<number>;
   readonly unbindRoot?: (targetRoot: string, rel: string) => Promise<number>;
   readonly mountinfo?: () => string;
@@ -167,18 +166,15 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
 
   // Through the thread pool: the target is under the mount.
   const registerWithGuard = async (target: string): Promise<void> => {
-    if (guard === undefined) return;
+    const attachedGuard = guard;
+    if (attachedGuard === undefined) return;
     let fd: number;
     try {
       fd = await openDirectory(target);
     } catch {
       return; // Gone again; nothing to guard.
     }
-    if (guard === undefined) {
-      closeSync(fd);
-      return;
-    }
-    guard.addRoot(target, fd);
+    attachedGuard.addRoot(target, fd); // The guard owns the descriptor, even on failure.
   };
 
   const targetOf = (rel: string): string => join(mountPoint, rel);
@@ -191,8 +187,8 @@ export function createNativeRoots(options: NativeRootsOptions): NativeRoots {
     return options.ignore.ignores(rel) && !options.ignore.ignores(parentOf(rel));
   };
 
-  // Everything strictly under the mount point. The FUSE mount itself sits
-  // at the mount point and is excluded.
+  // Treat every mount strictly below the mount point as owned. The FUSE
+  // mount itself sits at the mount point and is excluded.
   const owned = (): string[] => {
     let text: string;
     try {
