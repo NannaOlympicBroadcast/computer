@@ -43,7 +43,7 @@ Current filesystem support:
 
 - `@platformatic/vfs` in-memory filesystem provided by `@cloudflare/dofs`'s node provider.
 - FUSE operation adapter covering the full operation surface the binding exposes.
-- Local-only paths (`MOUNT_IGNORE`) served from the container's disk and kept out of sync. When the kernel supports it, local-only directories are bind-mounted and never reach `computerd` at all; see [Native roots](#native-roots).
+- Local-only paths (`MOUNT_IGNORE`) served from the container's disk and kept out of sync. With the required kernel support and mount permissions, eligible directories can be bind-mounted to bypass computerd; see [Native roots](#native-roots).
 - Unsupported FUSE operations return `ENOSYS` to the kernel; the binding logs a one-shot warning per operation.
 - capnweb RPC over `/api` exposes the workspace database and an `exec` runner to clients.
 - Synchronization is driven by whoever holds the other end of the session. The daemon serves `SyncRPC`; it does not run a sync loop of its own.
@@ -358,7 +358,7 @@ root-directory descriptors, rejects symlinks in every path component,
 clones a private mount, and attaches it to the pinned target. It does not
 pass user-controlled paths to a mount command. If the helper is unavailable
 or rejects a path, it does not attempt a path-based bind. Check
-`/__computerd/info` for the most recent failed bind.
+`/__computerd/stats` for `localPaths.nativeRoots.lastFailure`.
 
 Roots are mounted when they appear, with no watcher:
 

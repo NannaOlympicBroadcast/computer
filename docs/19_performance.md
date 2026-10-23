@@ -121,13 +121,14 @@ transfer that no longer follows it.
 > absolute times as local. `script/run-fs-bench.sh` (with `LOCAL_ONLY=1`)
 > and `script/run-npm-bench.sh` (with `IGNORE_NODE_MODULES=1`) reproduce
 > them, with `COMPUTERD_FUSE_NATIVE_ROOTS=0`: local-only directories are
-> now bind-mounted by default (next section).
+> eligible for native mounts by default where supported (next section).
 
 ### Native roots
 
-Passthrough leaves metadata on computerd's event loop. computerd now
-bind-mounts each local-only directory from the container's disk, so
-nothing under it reaches computerd at all. See
+Passthrough leaves metadata on computerd's event loop. Where supported,
+computerd can bind-mount eligible local-only directories from the
+container's disk, so nothing under a mounted root reaches computerd.
+See
 [`computerd`: Native roots](../packages/computerd/README.md#native-roots).
 
 These runs were all taken on the same machine, one after another. The
