@@ -31,6 +31,7 @@ removed in a future release; each one names its replacement.
 | Observability hook and its Cloudflare adapter | `@cloudflare/computer`, `@cloudflare/computer/observe/cloudflare` | Stable |
 | `ContainerBackend` and `withWorkspaceContainer` | `@cloudflare/computer/backends/container` | Experimental |
 | `ComputerdBackend` and `DockerContainerBackend` | `@cloudflare/computer/backends/computerd` | Experimental; runs outside Cloudflare |
+| `TailscaleComputerdBackend`, `discoverTailscalePeers`, and `resolveTailscaleTarget` | `@cloudflare/computer/backends/computerd` | Experimental; connects to remote/virtual-LAN `computerd` peers over Tailscale |
 | `LegacyContainerBackend` and `withLegacyWorkspaceContainer` | `@cloudflare/computer/backends/container-legacy` | Deprecated: use `ContainerBackend` |
 | Resuming interrupted isolate JavaScript: `onInterrupt: "restart"` and `"replay"`, `workspace.runtime.recover()`, `unsafeToRepeat()`, and waiting for answers with `ctx.interrupt()`, `pending()` and `respond()` | `@cloudflare/computer`, `@cloudflare/computer/backends/worker-javascript` | Experimental |
 | `WorkerShellBackend` and the shell command groups | `@cloudflare/computer/backends/worker-shell`, `@cloudflare/computer/shell/*` | Experimental |
@@ -665,6 +666,7 @@ container backends use.
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | `ComputerdBackend`       | A `computerd` is already running: a local process, a container you started, a VM. Takes `url` and `secret`.                  |
 | `DockerContainerBackend` | You want the backend to start `computerd` in Docker through the local `docker` CLI, and remove the container on `close()`. |
+| `TailscaleComputerdBackend` | A `computerd` is running on a remote machine or virtual LAN reachable over your Tailscale Tailnet (by hostname, MagicDNS, IP, or auto-probe). |
 
 ```ts
 import { DockerContainerBackend } from "@cloudflare/computer/backends/computerd";

@@ -2,7 +2,8 @@
 //
 // Backends that run a Workspace without Cloudflare: ComputerdBackend
 // dials a running `computerd`; DockerContainerBackend starts one in
-// Docker. See computerd-backend.ts and docker.ts.
+// Docker; TailscaleComputerdBackend resolves and connects to a
+// `computerd` peer across a Tailscale Tailnet.
 
 export {
   ComputerdBackend,
@@ -14,3 +15,11 @@ export {
   type DockerContainerBackendOptions,
   type DockerDesktopOptions,
 } from "./docker.js";
+export {
+  discoverTailscalePeers,
+  resolveTailscaleTarget,
+  TailscaleComputerdBackend,
+  type TailscaleComputerdBackendOptions,
+  type TailscaleDiscoverOptions,
+  type TailscalePeerInfo,
+} from "./tailscale.js";

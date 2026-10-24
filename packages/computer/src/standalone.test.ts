@@ -13,7 +13,13 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import { ComputerdBackend, DockerContainerBackend } from "./backends/computerd/index.js";
+import {
+  ComputerdBackend,
+  DockerContainerBackend,
+  TailscaleComputerdBackend,
+  discoverTailscalePeers,
+  resolveTailscaleTarget,
+} from "./backends/computerd/index.js";
 import { getWorkspace } from "./client.js";
 import { WorkspaceDesktop } from "./desktop/index.js";
 import { NodeSQLiteStorage } from "./node-storage.js";
@@ -81,11 +87,12 @@ describe("Workspace without Cloudflare", () => {
 describe("Workspace + ComputerdBackend", () => {
   let child: ChildProcess | undefined;
   let url = "";
+  let port = 0;
   let dir = "";
 
   beforeAll(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "ws-computerd-"));
-    const port = await freePort();
+    port = await freePort();
     url = `http://127.0.0.1:${port}`;
     child = spawn(process.execPath, [cliPath], {
       env: {
@@ -117,6 +124,80 @@ describe("Workspace + ComputerdBackend", () => {
       // computerd was started without a desktop.
       expect(await ws.desktop.status()).toMatchObject({ enabled: false, running: false });
       await expect(ws.desktop.screenshot()).rejects.toThrow(/desktop|ENOSYS|not/i);
+    } finally {
+      await ws.close();
+    }
+  }, 60_000);
+
+  test("discovers Tailscale peers and connects via TailscaleComputerdBackend", async () => {
+    const fakeTailscaleStatus = JSON.stringify({
+      Self: {
+        ID: "self-node",
+        HostName: "local-dev",
+        DNSName: "local-dev.tail1234.ts.net.",
+        TailscaleIPs: ["100.64.0.1"],
+        OS: "windows",
+        Online: true,
+      },
+      Peer: {
+        "nodekey:abc": {
+          ID: "peer-1",
+          HostName: "ubuntu-gpu",
+          DNSName: "ubuntu-gpu.tail1234.ts.net.",
+          TailscaleIPs: ["127.0.0.1", "fd7a:115c:a1e0::2"],
+          OS: "linux",
+          Online: true,
+        },
+        "nodekey:offline": {
+          ID: "peer-2",
+          HostName: "old-laptop",
+          DNSName: "old-laptop.tail1234.ts.net.",
+          TailscaleIPs: ["100.64.0.99"],
+          OS: "macos",
+          Online: false,
+        },
+      },
+    });
+    const execCommand = async () => fakeTailscaleStatus;
+
+    const peers = await discoverTailscalePeers({
+      execCommand,
+      probeComputerdPort: port,
+      noVncPort: 6080,
+    });
+    expect(peers).toHaveLength(2);
+    const gpuPeer = peers.find((p) => p.hostName === "ubuntu-gpu");
+    expect(gpuPeer?.computerd).toEqual({
+      reachable: true,
+      url: `http://127.0.0.1:${port}`,
+      noVncUrl: "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale",
+    });
+
+    const magicTarget = await resolveTailscaleTarget({
+      peer: "ubuntu-gpu",
+      port,
+      preferMagicDns: true,
+      execCommand,
+    });
+    expect(magicTarget.url).toBe(`http://ubuntu-gpu.tail1234.ts.net:${port}`);
+
+    const backend = new TailscaleComputerdBackend({
+      peer: "ubuntu-gpu",
+      port,
+      secret: "secret",
+      readyTimeoutMs: 20_000,
+      execCommand,
+    });
+    const ws = new Workspace({ backends: [backend] });
+    try {
+      await ws.fs.mkdir("/workspace", { recursive: true });
+      await ws.fs.writeFile("/workspace/tailscale.txt", "via-tailnet");
+      for await (const _ of ws.push()) {
+        // drain
+      }
+      expect(backend.url).toBe(`http://127.0.0.1:${port}`);
+      expect(backend.noVncUrl).toBe("http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale");
+      expect(backend.peerInfo?.hostName).toBe("ubuntu-gpu");
     } finally {
       await ws.close();
     }

@@ -1,0 +1,7 @@
+# OpenAI Codex CLI configuration snippet for the computer-agent plugin.
+# Merge into ~/.codex/config.toml or project .codex/config.toml.
+
+[mcp_servers.computer-agent]
+command = "node"
+args = ["plugins/computer-agent/mcp/server.mjs"]
+enabled = true

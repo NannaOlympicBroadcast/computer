@@ -1,0 +1,14 @@
+{
+  "name": "computer-agent",
+  "version": "0.1.0",
+  "description": "Control local Docker or remote Tailscale @cloudflare/computer instances with persistent SQLite VFS, Git, shell execution, and X11 GUI desktop automation via MCP tools or the standalone computer-cli.",
+  "author": {
+    "name": "yanyan0406"
+  },
+  "keywords": ["computer", "desktop", "tailscale", "computer-use", "mcp", "cli"],
+  "commands": [
+    "./commands/computer.md",
+    "./commands/computer-desktop.md",
+    "./commands/computer-tailscale.md"
+  ]
+}
