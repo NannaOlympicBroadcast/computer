@@ -1,0 +1,6 @@
+*
+!packages
+!packages/computerd
+!packages/computerd/dist
+!packages/computerd/dist/cli
+!packages/computerd/dist/cli/**

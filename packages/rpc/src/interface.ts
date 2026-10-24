@@ -13,9 +13,10 @@
 //                    the receiver already holds.
 //
 // The exec / getExec / killExec / disposeExec surface hangs off a
-// sibling ShellRPC interface. Both compose under the top-level
-// WorkspaceRPC, so the wire stub exposes one stable surface while
-// the two halves stay internally separable.
+// sibling ShellRPC interface, and desktop GUI operations hang off
+// DesktopRPC. All compose under the top-level WorkspaceRPC, so the
+// wire stub exposes one stable surface while the parts stay
+// internally separable.
 
 import type { ChangeCursor, ChangeEntry } from "@cloudflare/dofs";
 
@@ -188,12 +189,170 @@ export interface ShellRPC {
   disposeExec(input: { id: string }): Promise<void>;
 }
 
+export type DesktopMouseButton =
+  | "left"
+  | "middle"
+  | "right"
+  | "back"
+  | "forward"
+  | 1
+  | 2
+  | 3
+  | 4
+  | 5;
+
+export type DesktopScrollDirection = "up" | "down" | "left" | "right";
+
+export type DesktopKeyAction = "press" | "down" | "up";
+
+export interface DesktopPoint {
+  x: number;
+  y: number;
+  screen?: number;
+}
+
+export interface DesktopRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DesktopScreenshotOptions {
+  format?: "png" | "jpeg";
+  quality?: number;
+  region?: DesktopRegion;
+  display?: string;
+}
+
+export interface DesktopScreenshotResult {
+  data: Uint8Array;
+  mimeType: "image/png" | "image/jpeg";
+  width: number;
+  height: number;
+}
+
+export interface DesktopClickInput {
+  x?: number;
+  y?: number;
+  button?: DesktopMouseButton;
+  count?: number;
+  modifiers?: string[];
+}
+
+export interface DesktopMoveInput {
+  x: number;
+  y: number;
+  relative?: boolean;
+}
+
+export interface DesktopMouseButtonInput {
+  x?: number;
+  y?: number;
+  button?: DesktopMouseButton;
+}
+
+export interface DesktopDragInput {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  button?: DesktopMouseButton;
+  steps?: number;
+  durationMs?: number;
+}
+
+export interface DesktopScrollInput {
+  x?: number;
+  y?: number;
+  direction?: DesktopScrollDirection;
+  amount?: number;
+  deltaX?: number;
+  deltaY?: number;
+}
+
+export interface DesktopTypeInput {
+  text: string;
+  delayMs?: number;
+}
+
+export interface DesktopKeyInput {
+  key: string;
+  action?: DesktopKeyAction;
+}
+
+export interface DesktopScreenSize {
+  width: number;
+  height: number;
+  display: string;
+}
+
+export interface DesktopWindowInfo {
+  id: string;
+  title: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  pid?: number;
+  active?: boolean;
+}
+
+export interface DesktopStartOptions {
+  width?: number;
+  height?: number;
+  depth?: number;
+  display?: string;
+}
+
+export interface DesktopStatus {
+  enabled: boolean;
+  running: boolean;
+  display: string;
+  width: number;
+  height: number;
+  depth: number;
+  vncPort: number | null;
+  noVncPort: number | null;
+  windowManager: string | null;
+}
+
+// Desktop GUI automation surface served by computerd when running in a
+// desktop-enabled container (Xvfb + window manager + xdotool / scrot /
+// x11vnc / noVNC).
+export interface DesktopRPC {
+  status(): Promise<DesktopStatus>;
+  start(options?: DesktopStartOptions): Promise<DesktopStatus>;
+  stop(): Promise<DesktopStatus>;
+  screenshot(options?: DesktopScreenshotOptions): Promise<DesktopScreenshotResult>;
+  click(input: DesktopClickInput): Promise<void>;
+  doubleClick(input: { x?: number; y?: number; button?: DesktopMouseButton }): Promise<void>;
+  tripleClick(input: { x?: number; y?: number; button?: DesktopMouseButton }): Promise<void>;
+  rightClick(input: { x?: number; y?: number }): Promise<void>;
+  middleClick(input: { x?: number; y?: number }): Promise<void>;
+  mouseDown(input?: DesktopMouseButtonInput): Promise<void>;
+  mouseUp(input?: DesktopMouseButtonInput): Promise<void>;
+  move(input: DesktopMoveInput): Promise<void>;
+  drag(input: DesktopDragInput): Promise<void>;
+  scroll(input: DesktopScrollInput): Promise<void>;
+  type(input: DesktopTypeInput): Promise<void>;
+  key(input: DesktopKeyInput): Promise<void>;
+  cursorPosition(): Promise<DesktopPoint>;
+  screenSize(): Promise<DesktopScreenSize>;
+  windows(): Promise<DesktopWindowInfo[]>;
+  focusWindow(input: { id?: string; title?: string }): Promise<void>;
+  clipboardRead(): Promise<string>;
+  clipboardWrite(input: { text: string }): Promise<void>;
+  wait(input: { durationMs: number }): Promise<void>;
+}
+
 // Composite stub. The wire serves one of these per session; the
-// two halves are independently testable. Host-side callers reach
-// each via `.sync` / `.shell`.
+// parts are independently testable. Host-side callers reach each
+// via `.sync`, `.shell`, and `.desktop`.
 export interface WorkspaceRPC {
   sync: SyncRPC;
   shell: ShellRPC;
+  desktop?: DesktopRPC;
 }
 
 // Every event carries a per-id monotonic `seq`. The host-side
@@ -209,6 +368,7 @@ export type ExecEvent =
 // on err.code rather than parse messages.
 export type WireErrorCode =
   | "ENOENT"
+  | "ENOSYS"
   | "EUNKNOWN_HASH"
   | "ESHUTDOWN"
   | "EAUTH"
