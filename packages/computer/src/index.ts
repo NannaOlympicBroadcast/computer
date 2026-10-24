@@ -122,6 +122,7 @@ export { type RawShellValue, type ShellValue, sh, shellQuote } from "./sh.js";
 export type { ExecEncoding, ExecSyncResult, KillSignal } from "./shell.js";
 export {
   WorkspaceAssetsStub,
+  WorkspaceDesktopStub,
   WorkspaceFilesystemStub,
   WorkspaceGitStub,
   WorkspaceRuntimeExecHandleStub,
@@ -137,4 +138,6 @@ export {
 export { WorkspaceFileStore } from "./tools/common/fs/store.js";
 export type { FileStat, FileStore, MutableFileStore } from "./tools/common/fs/types.js";
 export { Workspace, type WorkspaceGitFactory, type WorkspaceOptions } from "./workspace.js";
+export { type DesktopCallPolicy, WorkspaceDesktop } from "./desktop/index.js";
+export { NodeSQLiteStorage } from "./node-storage.js";
 export { WORKSPACE_ROOT } from "./workspace-root.js";

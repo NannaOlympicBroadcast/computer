@@ -4,6 +4,12 @@
  */
 
 import type { z } from "zod";
+import {
+  createDesktopExecutor,
+  desktopDescription,
+  desktopInputSchema,
+  desktopModelOutput,
+} from "../common/desktop.js";
 import { defineExec } from "../common/exec.js";
 import {
   deleteDescription,
@@ -196,6 +202,17 @@ export function createTanStackTools<Format extends TanStackToolFormat = "array">
             : await settle(returned);
           return plain(output);
         },
+      });
+    }
+
+    if (resolved.desktop) {
+      const executor = createDesktopExecutor(workspace);
+      add({
+        name: "desktop",
+        description: desktopDescription,
+        inputSchema: desktopInputSchema,
+        mutates: true,
+        run: async (input: never) => toTanStackOutput(desktopModelOutput(await executor(input))),
       });
     }
 

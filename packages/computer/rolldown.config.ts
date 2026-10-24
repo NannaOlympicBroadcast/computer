@@ -41,6 +41,7 @@ export default defineConfig({
     "modules/tools": "src/modules/tools.ts",
     "modules/assets": "src/modules/assets.ts",
     "backends/container-legacy/index": "src/backends/container-legacy/index.ts",
+    "backends/computerd/index": "src/backends/computerd/index.ts",
     "backends/container/index": "src/backends/container/index.ts",
     "backends/worker-javascript/index": "src/backends/worker-javascript/index.ts",
     "backends/worker-shell/index": "src/backends/worker-shell/index.ts",

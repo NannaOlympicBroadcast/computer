@@ -6,6 +6,7 @@
 //   @cloudflare/computer/tools/tanstack-ai  createTanStackTools
 export {
   createDeleteTool,
+  createDesktopTool,
   createEditTool,
   createExecTool,
   createFindTool,
@@ -23,6 +24,7 @@ export type {
   ExecToolOptions,
   ExecToolOutput,
 } from "./common/exec.js";
+export type { DesktopToolOptions } from "./common/desktop.js";
 export type { DeleteToolOptions } from "./common/fs/delete.js";
 export type { EditToolOptions } from "./common/fs/edit.js";
 export type { FindToolOptions } from "./common/fs/find.js";

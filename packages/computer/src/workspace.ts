@@ -37,11 +37,13 @@ import {
 } from "./artifacts/index.js";
 import type { AssetsClient } from "./assets/index.js";
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import { WorkspaceDesktop } from "./desktop/index.js";
 import { ExecutionRuntimeTracker, SqlExecutionRuntimeStore } from "./execution-runtime-tracker.js";
 import type { GitClient, GitClientFactory, GitIdentity } from "./git/index.js";
 import { MountIndex } from "./mounts/index.js";
 import { buildMountRegistry, type MountValue } from "./mounts/registry.js";
 import type { Mount } from "./mounts/types.js";
+import { NodeSQLiteStorage } from "./node-storage.js";
 import { noopObserver, safeErrorMessage, type WorkspaceObserver, withSpan } from "./observe.js";
 import { createSyncLogger, type SyncLogger } from "./observe/sync-telemetry.js";
 import {
@@ -80,7 +82,10 @@ export interface WorkspaceOptions {
   // `ctx.storage`; in tests, pass a SQLiteTestStorage from
   // @cloudflare/dofs/testing. The constructor opens a
   // Database against it and runs initializeSchema (idempotent).
-  storage: DurableObjectStorageLike;
+  //
+  // Outside Cloudflare, omit it for an in-memory node:sqlite store, or
+  // pass a file path to persist the Workspace on local disk.
+  storage?: DurableObjectStorageLike | string;
 
   // Registered execution backends. The first is the default;
   // callers can select another by stable id.
@@ -175,6 +180,12 @@ export interface WorkspaceOptions {
   output?: WorkspaceOutputOptions | false;
 }
 
+function resolveStorage(storage: WorkspaceOptions["storage"]): DurableObjectStorageLike {
+  if (storage === undefined) return new NodeSQLiteStorage(":memory:");
+  if (typeof storage === "string") return new NodeSQLiteStorage(storage);
+  return storage;
+}
+
 export type WorkspaceGitFactory = GitClientFactory;
 
 const GIT_NOT_CONFIGURED_MESSAGE =
@@ -216,6 +227,7 @@ export class Workspace {
   // Lazily-constructed git client, cached so the dynamic
   // imports of isomorphic-git / diff land once per Workspace.
   #git: GitClient | undefined;
+  #desktop: WorkspaceDesktop | undefined;
   readonly #mounts: Map<string, Mount>;
   readonly #mountIndex: MountIndex;
   // Per-backend handle cache. Filled lazily on first use of each
@@ -262,7 +274,7 @@ export class Workspace {
     this.#artifacts = options.artifacts
       ? createArtifact(options.artifacts.binding, artifactsSessionId(options))
       : createDisabledArtifactsClient();
-    this.#db = new Database(options.storage);
+    this.#db = new Database(resolveStorage(options.storage));
     initializeSchema(this.#db, this.#now);
     this.#executionRuntimes = new ExecutionRuntimeTracker(
       1_024,
@@ -386,6 +398,37 @@ export class Workspace {
 
   get artifacts(): ArtifactClient {
     return this.#artifacts;
+  }
+
+  // Desktop GUI automation against the default backend (or another one
+  // via `desktop.backend(id)`). Needs a backend whose computerd runs a
+  // desktop, such as DockerContainerBackend with `desktop: true`;
+  // otherwise every call rejects with ENOSYS.
+  get desktop(): WorkspaceDesktop {
+    this.#desktop ??= new WorkspaceDesktop((backend, operation, policy, op) => {
+      const id = this.#resolveBackendId(backend);
+      if (id === undefined || !this.#backendsById.has(id)) {
+        return Promise.reject(
+          new Error("Workspace desktop needs a computerd backend; none is configured."),
+        );
+      }
+      return this.#runWithReconnect(
+        id,
+        operation,
+        (handle) => {
+          const desktop = handle.rpc.desktop;
+          if (desktop === undefined) {
+            throw Object.assign(
+              new Error(`Workspace backend ${JSON.stringify(id)} does not provide a desktop.`),
+              { code: "ENOSYS" },
+            );
+          }
+          return op(desktop);
+        },
+        policy,
+      );
+    });
+    return this.#desktop;
   }
 
   get runtime(): WorkspaceRuntime {

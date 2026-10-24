@@ -39,7 +39,10 @@ callers the filesystem on its own.
 If you want to build on Cloudflare Computer, install
 [`@cloudflare/computer`](packages/computer/README.md) and follow that
 package's README — it has the installation steps, the entrypoint map,
-and worked examples of the `fs` and `runtime` surfaces.
+and worked examples of the `fs` and `runtime` surfaces. It also runs
+outside Cloudflare, in plain Node.js or Docker, and can drive a desktop
+container; see [Running without Cloudflare](packages/computer/README.md#running-without-cloudflare)
+and [Desktop](packages/computer/README.md#desktop).
 
 To contribute feedback, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 Approved collaborators should follow [`COLLABORATORS.md`](COLLABORATORS.md)

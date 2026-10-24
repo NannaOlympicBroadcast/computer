@@ -1,6 +1,13 @@
 import { type Tool, tool } from "ai";
 import type { z } from "zod";
 import {
+  createDesktopExecutor,
+  type DesktopToolOptions,
+  desktopDescription,
+  desktopInputSchema,
+  desktopModelOutput,
+} from "../common/desktop.js";
+import {
   defineExec,
   type ExecInput,
   type ExecToolOptions,
@@ -137,5 +144,17 @@ export function createPublishTool(
     description: publishDescription,
     inputSchema: publishInputSchema,
     execute: (input) => execute(input),
+  });
+}
+
+export function createDesktopTool(
+  options: DesktopToolOptions,
+): Tool<z.infer<typeof desktopInputSchema>> {
+  const execute = createDesktopExecutor(options.workspace);
+  return tool({
+    description: desktopDescription,
+    inputSchema: desktopInputSchema,
+    execute: (input) => execute(input),
+    toModelOutput: ({ output }: { output: unknown }) => toAISDKOutput(desktopModelOutput(output)),
   });
 }
