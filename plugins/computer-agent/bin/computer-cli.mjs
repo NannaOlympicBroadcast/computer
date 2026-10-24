@@ -265,8 +265,12 @@ async function main() {
     if (group === "fs") {
       await withWorkspace(async (ws) => {
         if (sub === "ls") {
-          for await (const _ of ws.pull().catch(() => [])) {
-            // sync from container before listing
+          try {
+            for await (const _ of ws.pull()) {
+              // sync from container before listing
+            }
+          } catch {
+            // ignore pull error in local mode
           }
           const targetPath = rest[0] ?? "/workspace";
           const entries = await ws.fs.ls(targetPath, {
@@ -278,8 +282,12 @@ async function main() {
         if (sub === "read") {
           const targetPath = rest[0];
           if (!targetPath) throw new Error("Usage: computer-cli fs read <path> [--out local-file]");
-          for await (const _ of ws.pull().catch(() => [])) {
-            // best-effort pull before read
+          try {
+            for await (const _ of ws.pull()) {
+              // best-effort pull before read
+            }
+          } catch {
+            // ignore pull error in local mode
           }
           if (typeof flags.out === "string") {
             const bytes = await ws.fs.readFile(targetPath);
@@ -309,8 +317,12 @@ async function main() {
             payload = rest.slice(1).join(" ");
           }
           await ws.fs.writeFile(targetPath, payload);
-          for await (const _ of ws.push().catch(() => [])) {
-            // best-effort push after write
+          try {
+            for await (const _ of ws.push()) {
+              // best-effort push after write
+            }
+          } catch {
+            // ignore push error in local mode
           }
           outputSuccess("fs write", {
             path: targetPath,

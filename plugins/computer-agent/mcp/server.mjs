@@ -398,8 +398,12 @@ async function handleToolCall(name, args = {}) {
         const action = args.action;
         const targetPath = args.path ?? "/workspace";
         if (action === "ls") {
-          for await (const _ of ws.pull().catch(() => [])) {
-            // best-effort pull before listing
+          try {
+            for await (const _ of ws.pull()) {
+              // best-effort pull before listing
+            }
+          } catch {
+            // ignore pull error in local mode
           }
           const entries = await ws.fs.ls(targetPath, {
             recursive: Boolean(args.recursive),
@@ -407,8 +411,12 @@ async function handleToolCall(name, args = {}) {
           return jsonResponse({ path: targetPath, entries });
         }
         if (action === "read") {
-          for await (const _ of ws.pull().catch(() => [])) {
-            // best-effort pull before reading
+          try {
+            for await (const _ of ws.pull()) {
+              // best-effort pull before reading
+            }
+          } catch {
+            // ignore pull error in local mode
           }
           const content = await ws.fs.readFile(targetPath, "utf8");
           return jsonResponse({ path: targetPath, content });
@@ -419,8 +427,12 @@ async function handleToolCall(name, args = {}) {
             await ws.fs.mkdir(dir, { recursive: true });
           }
           await ws.fs.writeFile(targetPath, args.content ?? "");
-          for await (const _ of ws.push().catch(() => [])) {
-            // best-effort push after write
+          try {
+            for await (const _ of ws.push()) {
+              // best-effort push after write
+            }
+          } catch {
+            // ignore push error in local mode
           }
           return jsonResponse({
             path: targetPath,
