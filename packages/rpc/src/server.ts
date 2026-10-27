@@ -26,7 +26,28 @@ import {
 import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
 import { trackStub, untrackStub } from "./debug.js";
-import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "./interface.js";
+import type {
+  DesktopClickInput,
+  DesktopDragInput,
+  DesktopKeyInput,
+  DesktopMouseButton,
+  DesktopMouseButtonInput,
+  DesktopMoveInput,
+  DesktopPoint,
+  DesktopRPC,
+  DesktopScreenSize,
+  DesktopScreenshotOptions,
+  DesktopScreenshotResult,
+  DesktopScrollInput,
+  DesktopStartOptions,
+  DesktopStatus,
+  DesktopTypeInput,
+  DesktopWindowInfo,
+  ExecEvent,
+  ShellRPC,
+  SyncRPC,
+  WorkspaceRPC,
+} from "./interface.js";
 
 // Subset of computerd's Runner that the shell server needs. Defining
 // the shape here (instead of importing the concrete class) keeps
@@ -57,8 +78,17 @@ export interface RunnerLike {
   dispose(id: string): void;
 }
 
+// Driver interface implemented by computerd's DesktopController (or test fakes).
+export type DesktopLike = DesktopRPC;
+
 export interface ServerOptions {
   ignore?: string[];
+  /**
+   * Optional desktop controller exposed as `.desktop` on the composite
+   * WorkspaceRPC server. When omitted, `.desktop.status()` reports
+   * `enabled: false` and active desktop operations reject with ENOSYS.
+   */
+  desktop?: DesktopLike;
   /**
    * Optional hook fired inside the SyncRPC `push` handler, right
    * after a successful peer batch has been committed. Resolved
@@ -118,27 +148,8 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     } finally {
       reader.releaseLock();
     }
-    // senderRev > 0 — the caller is a sync peer with its
-    // own rev space; advance the fetch cursor to that point so
-    // subsequent pulls and the cross-side invariant check see the
-    // right appliedPushCursor. The apply path's alreadyApplied()
-    // check is what stops the entries from ping-ponging back
-    // through the sender's own coalesce + apply loop on the next
-    // round trip.
-    //
-    // senderRev === 0 — the caller is an external writer
-    // (an orchestrator using the wire as a transport, the
-    // soak script, a manual curl). Treat the entries as
-    // local writes: bump rev through the normal apply path,
-    // leave pushRev untouched so the outbound sync loop
-    // ships them upstream on the next tick.
     const senderCursor = input.senderCursor ?? { rev: input.senderRev, path: null };
     const isPeer = senderCursor.rev > 0;
-    // Wrap the whole batch in a single transactionSync so a
-    // mid-stream failure (e.g. a missing chunk in applyChangesSync's
-    // assembly step) rolls back every prior entry. Without this
-    // wrapper the receiver could be left with a subset of the
-    // pushed entries committed.
     this.db.transactionSync(() => {
       applyChangesSync(this.db, entries, new Map(), {
         source: isPeer ? "upstream" : "local",
@@ -148,29 +159,6 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
         writeFetchCursor(this.db, senderCursor);
       }
     });
-    // Settle the receiver's shim, and let the outcome decide what the
-    // caller is told — which differs by who the caller is.
-    //
-    // A peer push is replayable. Its sender holds a durable push
-    // cursor, so rejecting the acknowledgment leaves that cursor
-    // where it was and the next push replans the same block. That
-    // matters because the pre-command bracket pushes, advances on the
-    // acknowledgment, and only then spawns: acknowledging an
-    // unflushed block would retire it and let the command read stale
-    // disk. Replay is safe because these entries carry
-    // source: "upstream", which routes them through the
-    // already-applied and stale-tombstone guards.
-    //
-    // An external push is not replayable. It has no durable cursor to
-    // rewind, and its entries are applied as source: "local", which
-    // deliberately bypasses those guards because local writes are
-    // authored here rather than replayed. Reporting a failure after
-    // the commit therefore invites the caller to repeat a mutation
-    // that is not idempotent: a retried delete would carry the
-    // original revision and, with the stale-tombstone check skipped,
-    // remove a file some other writer recreated in between. So the
-    // failure is logged and the push acknowledged, leaving the shim's
-    // periodic reconcile to repair disk.
     if (this.options.afterApply !== undefined && entries.length > 0) {
       if (isPeer) {
         await this.options.afterApply();
@@ -202,9 +190,6 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
       try {
         await this.options.beforeFetch();
       } catch (err) {
-        // Settle hook failures must not surface as fetch failures —
-        // we still want to stream whatever's already in the store.
-        // Log so the operator notices a wedged shim, then carry on.
         console.warn("[SyncRPCServer] beforeFetch hook failed:", err);
       }
     }
@@ -225,9 +210,6 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     };
   }
 
-  // Bulk pull. Plans one block against the same cursor window
-  // fetchChanges uses, then encodes it as a pack so the caller needs no
-  // follow-up object round trips.
   async fetchChangePack(input: {
     after?: ChangeCursor;
     through?: ChangeCursor;
@@ -278,9 +260,6 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     };
   }
 
-  // Bulk push receiver. Decode fully before applying anything: a pack
-  // that fails validation must leave no partial state behind, because
-  // the sender advances its cursor on the acknowledgment this returns.
   async applyChangePack(input: {
     generation: string;
     stream: ReadableStream<Uint8Array>;
@@ -299,22 +278,7 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
       source: "upstream",
       receivedCursor: readFetchCursor(this.db),
     });
-    // The footer's block cursor is the sender's checkpoint; echo it so
-    // the sender advances only through what actually applied here.
     writeFetchCursor(this.db, decoded.footer.blockCursor);
-    // Mirror push(): settle the receiver's shim so a subsequent
-    // shell.exec sees the just-pushed files on disk. Pack mode is
-    // selected for exactly the large windows a pre-command push
-    // carries, so skipping this strands the shim on stale disk state.
-    //
-    // A rejection propagates rather than being logged. The caller
-    // treats an acknowledgment as "the receiver is ready", advances
-    // its durable push cursor on it, and then spawns the command, so
-    // acknowledging an unflushed block retires it permanently and
-    // lets the command read stale disk. Failing the RPC leaves the
-    // sender cursor where it was and the next push replans the same
-    // block; the entries are already committed here, and applying
-    // them again is absorbed by alreadyApplied().
     if (this.options.afterApply !== undefined && decoded.entries.length > 0) {
       await this.options.afterApply();
     }
@@ -334,10 +298,6 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     pushRev: number;
     fetchCursor: ChangeCursor;
   }> {
-    // Deferred command synchronization needs a cursor that includes
-    // writes still waiting in the userspace shim. Unlike the ordinary
-    // diagnostic read, a settled read propagates hook failures so the
-    // caller can persist an unfenced retry instead of a stale target.
     if (input.settle === true && this.options.beforeFetch !== undefined) {
       await this.options.beforeFetch();
     }
@@ -371,6 +331,7 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     }
   }
 }
+
 class ShellRPCServer extends RpcTarget implements ShellRPC {
   constructor(private readonly runner: RunnerLike) {
     super();
@@ -421,24 +382,222 @@ class ShellRPCServer extends RpcTarget implements ShellRPC {
   }
 }
 
-// Composite server: exposes both halves as named fields on one
-// stub. Capnweb walks the property tree on demand, so callers
-// only pay for the half they reach.
-class WorkspaceRPCServer extends RpcTarget implements WorkspaceRPC {
-  // sync / shell are exposed as getters — capnweb's RpcTarget
-  // refuses to traverse plain instance properties (the readLoop
-  // raises 'instance properties cannot be accessed over RPC').
-  // Getters look like methods to the dispatch path.
-  #sync: SyncRPC;
-  #shell: ShellRPC;
-  constructor(sync: SyncRPC, shell: ShellRPC) {
+function createDisabledDesktopError(): Error & { code: string } {
+  const err = new Error("Desktop environment is not enabled on this server.") as Error & {
+    code: string;
+  };
+  err.code = "ENOSYS";
+  return err;
+}
+
+const DISABLED_DESKTOP: DesktopLike = {
+  async status(): Promise<DesktopStatus> {
+    return {
+      enabled: false,
+      running: false,
+      display: ":99",
+      width: 1280,
+      height: 720,
+      depth: 24,
+      vncPort: null,
+      noVncPort: null,
+      windowManager: null,
+    };
+  },
+  async start(): Promise<DesktopStatus> {
+    throw createDisabledDesktopError();
+  },
+  async stop(): Promise<DesktopStatus> {
+    return this.status();
+  },
+  async screenshot(): Promise<DesktopScreenshotResult> {
+    throw createDisabledDesktopError();
+  },
+  async click(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async doubleClick(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async tripleClick(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async rightClick(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async middleClick(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async mouseDown(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async mouseUp(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async move(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async drag(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async scroll(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async type(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async key(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async cursorPosition(): Promise<DesktopPoint> {
+    throw createDisabledDesktopError();
+  },
+  async screenSize(): Promise<DesktopScreenSize> {
+    throw createDisabledDesktopError();
+  },
+  async windows(): Promise<DesktopWindowInfo[]> {
+    throw createDisabledDesktopError();
+  },
+  async focusWindow(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async clipboardRead(): Promise<string> {
+    throw createDisabledDesktopError();
+  },
+  async clipboardWrite(): Promise<void> {
+    throw createDisabledDesktopError();
+  },
+  async wait(input: { durationMs: number }): Promise<void> {
+    const ms = Math.max(0, Math.min(input.durationMs, 60_000));
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  },
+};
+
+class DesktopRPCServer extends RpcTarget implements DesktopRPC {
+  constructor(private readonly desktop: DesktopLike) {
     super();
-    this.#sync = sync;
-    this.#shell = shell;
     trackStub(this);
   }
 
   [Symbol.dispose](): void {
+    untrackStub(this);
+  }
+
+  status(): Promise<DesktopStatus> {
+    return this.desktop.status();
+  }
+
+  start(options?: DesktopStartOptions): Promise<DesktopStatus> {
+    return this.desktop.start(options);
+  }
+
+  stop(): Promise<DesktopStatus> {
+    return this.desktop.stop();
+  }
+
+  screenshot(options?: DesktopScreenshotOptions): Promise<DesktopScreenshotResult> {
+    return this.desktop.screenshot(options);
+  }
+
+  click(input: DesktopClickInput): Promise<void> {
+    return this.desktop.click(input);
+  }
+
+  doubleClick(input: { x?: number; y?: number; button?: DesktopMouseButton }): Promise<void> {
+    return this.desktop.doubleClick(input);
+  }
+
+  tripleClick(input: { x?: number; y?: number; button?: DesktopMouseButton }): Promise<void> {
+    return this.desktop.tripleClick(input);
+  }
+
+  rightClick(input: { x?: number; y?: number }): Promise<void> {
+    return this.desktop.rightClick(input);
+  }
+
+  middleClick(input: { x?: number; y?: number }): Promise<void> {
+    return this.desktop.middleClick(input);
+  }
+
+  mouseDown(input?: DesktopMouseButtonInput): Promise<void> {
+    return this.desktop.mouseDown(input);
+  }
+
+  mouseUp(input?: DesktopMouseButtonInput): Promise<void> {
+    return this.desktop.mouseUp(input);
+  }
+
+  move(input: DesktopMoveInput): Promise<void> {
+    return this.desktop.move(input);
+  }
+
+  drag(input: DesktopDragInput): Promise<void> {
+    return this.desktop.drag(input);
+  }
+
+  scroll(input: DesktopScrollInput): Promise<void> {
+    return this.desktop.scroll(input);
+  }
+
+  type(input: DesktopTypeInput): Promise<void> {
+    return this.desktop.type(input);
+  }
+
+  key(input: DesktopKeyInput): Promise<void> {
+    return this.desktop.key(input);
+  }
+
+  cursorPosition(): Promise<DesktopPoint> {
+    return this.desktop.cursorPosition();
+  }
+
+  screenSize(): Promise<DesktopScreenSize> {
+    return this.desktop.screenSize();
+  }
+
+  windows(): Promise<DesktopWindowInfo[]> {
+    return this.desktop.windows();
+  }
+
+  focusWindow(input: { id?: string; title?: string }): Promise<void> {
+    return this.desktop.focusWindow(input);
+  }
+
+  clipboardRead(): Promise<string> {
+    return this.desktop.clipboardRead();
+  }
+
+  clipboardWrite(input: { text: string }): Promise<void> {
+    return this.desktop.clipboardWrite(input);
+  }
+
+  wait(input: { durationMs: number }): Promise<void> {
+    return this.desktop.wait(input);
+  }
+}
+
+// Composite server: exposes sync, shell, and desktop as named getters on
+// one stub. Capnweb walks the property tree on demand, so callers only
+// pay for the surface they reach.
+class WorkspaceRPCServer extends RpcTarget implements WorkspaceRPC {
+  // sync / shell / desktop are exposed as getters — capnweb's RpcTarget
+  // refuses to traverse plain instance properties (the readLoop raises
+  // 'instance properties cannot be accessed over RPC'). Getters look
+  // like methods to the dispatch path.
+  #sync: SyncRPC;
+  #shell: ShellRPC;
+  #desktopLike: DesktopLike | undefined;
+  #desktop: DesktopRPC | undefined;
+  constructor(sync: SyncRPC, shell: ShellRPC, desktopLike?: DesktopLike) {
+    super();
+    this.#sync = sync;
+    this.#shell = shell;
+    this.#desktopLike = desktopLike;
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    (this.#desktop as unknown as Disposable | undefined)?.[Symbol.dispose]?.();
     untrackStub(this);
   }
   get sync(): SyncRPC {
@@ -446,6 +605,10 @@ class WorkspaceRPCServer extends RpcTarget implements WorkspaceRPC {
   }
   get shell(): ShellRPC {
     return this.#shell;
+  }
+  get desktop(): DesktopRPC {
+    this.#desktop ??= createDesktopServer(this.#desktopLike);
+    return this.#desktop;
   }
 }
 
@@ -467,29 +630,29 @@ export function createShellServer(runner: RunnerLike): ShellRPC {
   return new ShellRPCServer(runner);
 }
 
+// Construct a DesktopRPC bound to a DesktopLike controller.
+export function createDesktopServer(desktop: DesktopLike = DISABLED_DESKTOP): DesktopRPC {
+  return new DesktopRPCServer(desktop);
+}
+
 // Construct the composite WorkspaceRPC. The wire serves this on
-// /api so clients reach `.sync` and `.shell` through one session.
+// /api so clients reach `.sync`, `.shell`, and `.desktop` through one session.
 export function createWorkspaceServer(
   db: Database,
   runner: RunnerLike,
   options: ServerOptions = {},
 ): WorkspaceRPC {
-  return new WorkspaceRPCServer(createSyncServer(db, options), createShellServer(runner));
+  return new WorkspaceRPCServer(
+    createSyncServer(db, options),
+    createShellServer(runner),
+    options.desktop,
+  );
 }
 
-// Attach a capnweb RPC session to a WHATWG-shaped WebSocket. The
-// node `ws` package's server-side sockets implement the WHATWG
-// surface (addEventListener / send / close), so this works for
-// both browser-style sockets and ws-package sockets.
-//
-// The session is held alive by capnweb's internal event listeners
-// until the socket closes; the caller can drop the return value.
-// `ws` is typed loosely because we accept both browser-style WebSockets
-// (WHATWG EventTarget) and node `ws` package server sockets, which
-// share the addEventListener / send / close subset capnweb needs.
+// Attach a capnweb RPC session to a WHATWG-shaped WebSocket.
 export function acceptWebSocketSession(
   ws: WebSocket | { addEventListener: WebSocket["addEventListener"] },
-  rpc: SyncRPC | ShellRPC | WorkspaceRPC,
+  rpc: SyncRPC | ShellRPC | DesktopRPC | WorkspaceRPC,
 ): void {
   newWebSocketRpcSession(ws as unknown as WebSocket, rpc as unknown as RpcTarget);
 }

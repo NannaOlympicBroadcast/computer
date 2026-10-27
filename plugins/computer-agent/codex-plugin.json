@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "name": "computer-agent",
+  "display_name": "Computer Agent (Cloud Desktop & Tailscale)",
+  "version": "0.1.0",
+  "description": "Unified MCP + CLI plugin for OpenAI Codex CLI, Claude Code, and Google Antigravity to drive local Docker or remote Tailscale @cloudflare/computer instances.",
+  "skills": ["skills/computer-agent/SKILL.md"],
+  "rules": ["rules/AGENTS.md"],
+  "cli": {
+    "binary": "bin/computer-cli.mjs"
+  },
+  "mcp_servers": {
+    "computer-agent": {
+      "command": "node",
+      "args": ["mcp/server.mjs"]
+    }
+  }
+}

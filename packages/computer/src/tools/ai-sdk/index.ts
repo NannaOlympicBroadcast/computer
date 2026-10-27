@@ -3,6 +3,7 @@ import { type CreateToolsOptions, resolveToolOptions } from "../common/options.j
 import type { PublishWorkspaceLike } from "../common/publish.js";
 import {
   createDeleteTool,
+  createDesktopTool,
   createEditTool,
   createExecTool,
   createFindTool,
@@ -20,6 +21,7 @@ export type CreateAIToolsOptions = CreateToolsOptions;
 
 export {
   createDeleteTool,
+  createDesktopTool,
   createEditTool,
   createExecTool,
   createFindTool,
@@ -33,7 +35,7 @@ export {
 /**
  * Build the AI SDK tool set for a Workspace: `read`, `ls`, `find`, and
  * `grep`, plus `write`, `edit`, `delete`, `exec`, and `publish` unless
- * the set is read-only. `exec` offers every backend the Workspace has
+ * the set is read-only, and `desktop` when `desktop: true`. `exec` offers every backend the Workspace has
  * unless `exec` picks them.
  *
  * @param options - The Workspace and per-tool options.
@@ -58,6 +60,10 @@ export function createAITools(options: CreateAIToolsOptions): ToolSet {
 
   if (resolved.exec !== undefined) {
     tools.exec = createExecTool(resolved.exec);
+  }
+
+  if (resolved.desktop) {
+    tools.desktop = createDesktopTool({ workspace });
   }
 
   if (resolved.publish) {

@@ -51,7 +51,7 @@
 // need to live in @cloudflare/computer — the proxy works for any
 // DO that implements a fetch() handler answering /health and /api.
 
-import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { RpcTarget, WorkerEntrypoint } from "./cloudflare-workers.js";
 
 import type { ArtifactsCLIInput, ArtifactsCLIResult } from "./artifacts/index.js";
 import { hostDurableObjectId } from "./durable-object-name.js";

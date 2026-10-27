@@ -18,7 +18,7 @@
 // single `ws` accessor returning a `LegacyWorkspaceContainerAPI` —
 // an RpcTarget so it works the same in-isolate and across RPC.
 
-import { RpcTarget } from "cloudflare:workers";
+import { RpcTarget } from "../../cloudflare-workers.js";
 import { withHostName } from "../../durable-object-name.js";
 import { WorkspaceTransportError } from "../../transport-failure.js";
 import { ContainerClientSecret } from "./container-client-secret.js";

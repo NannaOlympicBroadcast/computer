@@ -1,0 +1,35 @@
+{
+  "name": "computer-agent",
+  "displayName": "Computer Agent (Cloud Desktop & Tailscale)",
+  "description": "Control local Docker or remote Tailscale @cloudflare/computer instances with persistent SQLite VFS, Git, shell execution, and X11 GUI desktop automation via MCP tools or the standalone computer-cli.",
+  "version": "0.1.0",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "yanyan0406"
+  },
+  "keywords": [
+    "computer",
+    "desktop",
+    "tailscale",
+    "computer-use",
+    "mcp",
+    "cli",
+    "x11",
+    "novnc",
+    "sandbox"
+  ],
+  "suggestedPrompts": [
+    {
+      "title": "Inspect Cloud Desktop Status",
+      "prompt": "Check the active computerd connection status and take a screenshot of the X11 desktop."
+    },
+    {
+      "title": "Discover Tailscale Computers",
+      "prompt": "Scan my Tailscale Tailnet for online computerd nodes and connect to the remote desktop."
+    },
+    {
+      "title": "Open URL in Cloud Browser",
+      "prompt": "Open Chromium on the cloud desktop, navigate to https://live.48.cn/Index/main/club/1, and capture a screenshot."
+    }
+  ]
+}

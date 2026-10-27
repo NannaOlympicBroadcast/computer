@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "computer-agent": {
+      "command": "node",
+      "args": ["mcp/server.mjs"]
+    }
+  }
+}

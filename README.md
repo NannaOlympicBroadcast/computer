@@ -39,7 +39,14 @@ callers the filesystem on its own.
 If you want to build on Cloudflare Computer, install
 [`@cloudflare/computer`](packages/computer/README.md) and follow that
 package's README — it has the installation steps, the entrypoint map,
-and worked examples of the `fs` and `runtime` surfaces.
+and worked examples of the `fs` and `runtime` surfaces. It also runs
+outside Cloudflare, in plain Node.js, Docker, or across a Tailscale
+Tailnet, and can drive an X11 desktop container; see
+[Running without Cloudflare](packages/computer/README.md#running-without-cloudflare),
+[Desktop](packages/computer/README.md#desktop), and the multi-host agent
+plugin in [`plugins/computer-agent`](plugins/computer-agent/README.md)
+(for Google Antigravity, Anthropic Claude Code, OpenAI ChatGPT Codex CLI,
+and the standalone `computer-cli`).
 
 To contribute feedback, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 Approved collaborators should follow [`COLLABORATORS.md`](COLLABORATORS.md)
@@ -129,6 +136,10 @@ package-specific status and usage notes.
   — private Docker image context for the prebuilt `computerd` linux-x64
   binary. The image, not an npm package, is the release artifact.
   Experimental.
+- [`plugins/computer-agent`](plugins/computer-agent/README.md)
+  — unified MCP server, Agent Skill, and standalone `computer-cli` plugin
+  for Google Antigravity, Anthropic Claude Code, and OpenAI ChatGPT Codex
+  CLI, with local Docker and remote Tailscale virtual-LAN support.
 
 ## Performance
 

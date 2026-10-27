@@ -5,6 +5,12 @@
  */
 
 import { z } from "zod";
+import {
+  createDesktopExecutor,
+  desktopDescription,
+  desktopInputSchema,
+  desktopModelOutput,
+} from "../common/desktop.js";
 import { defineExec } from "../common/exec.js";
 import { deleteDescription, deleteFromStore, deleteInputSchema } from "../common/fs/delete.js";
 import { editDescription, editInputSchema, editInStore } from "../common/fs/edit.js";
@@ -174,6 +180,17 @@ function piToolEntries(options: CreateToolsOptions): PiToolEntry[] {
       inputSchema: exec.inputSchema,
       prepareArguments: exec.prepareArguments,
       execute: (input, context) => exec.execute(input, context),
+    } as PiToolEntry);
+  }
+
+  if (resolved.desktop) {
+    const executor = createDesktopExecutor(workspace);
+    entries.push({
+      name: "desktop",
+      description: desktopDescription,
+      inputSchema: desktopInputSchema,
+      execute: (input) => executor(input),
+      toModelOutput: ({ output }) => desktopModelOutput(output),
     } as PiToolEntry);
   }
 

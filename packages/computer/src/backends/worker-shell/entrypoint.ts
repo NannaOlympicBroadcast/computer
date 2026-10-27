@@ -17,8 +17,8 @@
 // concurrent execs in the same isolate each get their own
 // workspace stub; there's no shared instance state to race.
 
-import { WorkerEntrypoint } from "cloudflare:workers";
 import { Bash, type CustomCommand, type SecureFetch } from "just-bash";
+import { WorkerEntrypoint } from "../../cloudflare-workers.js";
 
 import { WORKSPACE_ROOT } from "../../workspace-root.js";
 import { WorkspaceFsAdapter } from "./adapter.js";

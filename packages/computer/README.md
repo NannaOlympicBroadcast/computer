@@ -30,6 +30,8 @@ removed in a future release; each one names its replacement.
 | Assets and Artifacts | `@cloudflare/computer/assets`, `@cloudflare/computer/artifacts` | Stable |
 | Observability hook and its Cloudflare adapter | `@cloudflare/computer`, `@cloudflare/computer/observe/cloudflare` | Stable |
 | `ContainerBackend` and `withWorkspaceContainer` | `@cloudflare/computer/backends/container` | Experimental |
+| `ComputerdBackend` and `DockerContainerBackend` | `@cloudflare/computer/backends/computerd` | Experimental; runs outside Cloudflare |
+| `TailscaleComputerdBackend`, `discoverTailscalePeers`, and `resolveTailscaleTarget` | `@cloudflare/computer/backends/computerd` | Experimental; connects to remote/virtual-LAN `computerd` peers over Tailscale |
 | `LegacyContainerBackend` and `withLegacyWorkspaceContainer` | `@cloudflare/computer/backends/container-legacy` | Deprecated: use `ContainerBackend` |
 | Resuming interrupted isolate JavaScript: `onInterrupt: "restart"` and `"replay"`, `workspace.runtime.recover()`, `unsafeToRepeat()`, and waiting for answers with `ctx.interrupt()`, `pending()` and `respond()` | `@cloudflare/computer`, `@cloudflare/computer/backends/worker-javascript` | Experimental |
 | `WorkerShellBackend` and the shell command groups | `@cloudflare/computer/backends/worker-shell`, `@cloudflare/computer/shell/*` | Experimental |
@@ -316,6 +318,7 @@ Alongside `exec`, the runtime exposes `getExec`, `killExec`, and
 | --- | --- | --- | --- | --- |
 | **Container** | Experimental | `@cloudflare/computer/backends/container` | Shell commands in full Linux userland (real binaries, `npm`, `node`, network) | A Cloudflare Container running `computerd`, scheduled by the durable object (`scheduling_policy: "durable_object"`) |
 | **Container (legacy)** | Deprecated | `@cloudflare/computer/backends/container-legacy` | The same | A Cloudflare Container the platform schedules and sizes from the `containers` block |
+| **Computerd / Docker** | Experimental | `@cloudflare/computer/backends/computerd` | The same, outside Cloudflare | A `computerd` you run, or one the backend starts in Docker (optionally with a desktop) |
 | **Worker shell** | Experimental | `@cloudflare/computer/backends/worker-shell` | Shell commands via [just-bash](https://github.com/vercel-labs/just-bash) in a Dynamic Worker | A Worker Loader binding; `experimental` flag; the `just-bash` package |
 | **Worker JavaScript** | Stable | `@cloudflare/computer/backends/worker-javascript` | ECMAScript modules in a fresh Dynamic Worker | A Worker Loader binding |
 
@@ -508,6 +511,7 @@ on a computerd instance.
 | --- | --- |
 | `@cloudflare/computer` | The `Workspace` wrapper, `workspace.runtime`, stub types, the R2 and Worker bundle mounts, and proxy classes. |
 | `@cloudflare/computer/backends/container` | `ContainerBackend` and `withWorkspaceContainer`. Pulls in the computerd / capnweb sync plumbing. |
+| `@cloudflare/computer/backends/computerd` | `ComputerdBackend` and `DockerContainerBackend`, for running without Cloudflare. Node.js only. |
 | `@cloudflare/computer/backends/container-legacy` | Deprecated. `LegacyContainerBackend` and `withLegacyWorkspaceContainer`; use `@cloudflare/computer/backends/container` instead. |
 | `@cloudflare/computer/backends/worker-shell` | `WorkerShellBackend` and the bundled just-bash runtime. |
 | `@cloudflare/computer/backends/worker-javascript` | `WorkerJavaScriptBackend`, configured libraries, durable imports, `node:fs/promises`, and host modules. |
@@ -631,3 +635,108 @@ today.
 ## License
 
 MIT. See [`LICENSE`](../../LICENSE).
+
+## Running without Cloudflare
+
+`@cloudflare/computer` runs in plain Node.js 22.5 or later. It needs
+no `workerd`, no Durable Object, and no `--import` loader hook. Two
+things change outside Cloudflare: where the local store lives, and
+which backend runs your commands.
+
+**Local store.** Omit `storage` for an in-memory `node:sqlite` store,
+or pass a file path to keep the Workspace on disk. Pass any
+`DurableObjectStorageLike` (such as `ctx.storage`) as before.
+
+```ts
+import { Workspace } from "@cloudflare/computer";
+
+const ws = new Workspace({ storage: "./data/workspace.db" });
+await ws.fs.mkdir("/workspace", { recursive: true });
+await ws.fs.writeFile("/workspace/hello.txt", "hi");
+```
+
+`getWorkspace(ws)` accepts a `Workspace` directly, so the tool sets
+and the rest of the client surface work unchanged.
+
+**Backends.** Both come from `@cloudflare/computer/backends/computerd`
+and reach the daemon over the same capnweb WebSocket the Cloudflare
+container backends use.
+
+| Backend                  | Use it when                                                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `ComputerdBackend`       | A `computerd` is already running: a local process, a container you started, a VM. Takes `url` and `secret`.                  |
+| `DockerContainerBackend` | You want the backend to start `computerd` in Docker through the local `docker` CLI, and remove the container on `close()`. |
+| `TailscaleComputerdBackend` | A `computerd` is running on a remote machine or virtual LAN reachable over your Tailscale Tailnet (by hostname, MagicDNS, IP, or auto-probe). |
+
+```ts
+import { DockerContainerBackend } from "@cloudflare/computer/backends/computerd";
+
+const ws = new Workspace({
+  backends: [new DockerContainerBackend({ image: "computerd:latest" })],
+});
+const run = await ws.runtime.exec("uname -a");
+console.log((await run.result()).stdout);
+await ws.close();
+```
+
+`DockerContainerBackend` generates a random bearer secret per backend
+and passes it to the container as `RPC_CLIENT_SECRET`. Pass `secret`
+to choose your own. Use `dockerArgs` for flags such as `--privileged`
+or `--device /dev/fuse` when you want a real FUSE mount.
+
+## Desktop
+
+`workspace.desktop` drives a graphical desktop: screenshots, mouse,
+keyboard, clipboard, and windows. The desktop runs inside a
+`computerd` started with `DESKTOP_ENABLED=1` (Xvfb, Fluxbox, `x11vnc`,
+noVNC, and `xdotool` / `scrot` / ImageMagick / `xclip` / `wmctrl`).
+Build the image from `packages/computerd/Dockerfile.desktop`; see the
+[`computerd` README](../computerd/README.md#desktop).
+
+```ts
+const ws = new Workspace({
+  backends: [
+    new DockerContainerBackend({
+      image: "computerd-desktop:latest",
+      desktop: { resolution: "1280x800x24", hostNoVncPort: 6080 },
+    }),
+  ],
+});
+
+await ws.desktop.start();
+const shot = await ws.desktop.screenshot(); // { data, mimeType, width, height }
+await ws.desktop.click({ x: 640, y: 400 });
+await ws.desktop.type("hello");
+await ws.desktop.key("ctrl+a");
+```
+
+Open `http://localhost:6080/vnc.html` to watch the desktop live when
+you published `hostNoVncPort`.
+
+Input events (`click`, `type`, `key`, `drag`, `scroll`) are replayed
+after a dropped connection only when nothing reached the daemon, so a
+reconnect never clicks twice. Reads such as `screenshot` and `status`
+always retry. A backend without a desktop reports `enabled: false` from
+`status()` and rejects the other calls. `ws.desktop.backend(id)` picks
+a backend other than the first.
+
+Across the Worker/DO boundary, `WorkspaceStub` exposes the same
+surface as `stub.desktop`, and `getWorkspace(...)` clients expose
+`client.desktop`.
+
+### Desktop tool for agents
+
+Pass `desktop: true` to `createAITools`, `createPiTools`, or
+`createTanStackTools` to add a `desktop` tool. It takes an `action`
+(`screenshot`, `click`, `double_click`, `drag`, `scroll`, `type`, `key`,
+`clipboard_read`, `windows`, and so on) and shows screenshots to the
+model as images. The tool is off by default because it needs a
+desktop-enabled backend. `createDesktopTool` is also exported from
+`@cloudflare/computer/tools/ai-sdk` (and `@cloudflare/computer/tools`)
+for use on its own.
+
+```ts
+import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
+
+const tools = createAITools({ workspace: ws, desktop: true });
+```

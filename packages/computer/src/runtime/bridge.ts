@@ -1,4 +1,4 @@
-import { RpcTarget } from "cloudflare:workers";
+import { RpcTarget } from "../cloudflare-workers.js";
 
 import { utf8ByteLength, utf8Prefix } from "../text-truncation.js";
 import { assertRuntimeValue, type WorkspaceRuntimeCapability } from "./capability.js";

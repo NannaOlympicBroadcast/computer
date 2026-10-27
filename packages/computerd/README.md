@@ -394,3 +394,57 @@ npm run build:bin --workspace=@cloudflare/computerd
 ```
 
 The binary is produced with Node's Single Executable Application (SEA) feature: `scripts/build-bin.mjs` bundles the CLI with `esbuild`, generates a SEA blob via `node --experimental-sea-config`, downloads the target's Node binary, and injects the blob with `postject`. macOS targets are stripped and re-signed ad-hoc. `fuse-native` prebuilds and `libfuse` are embedded as SEA assets per target.
+
+## Desktop
+
+`computerd` can run a graphical desktop and serve GUI automation over
+the same capnweb session as sync and exec. It is off by default.
+
+Set `DESKTOP_ENABLED=1` to supervise four processes: `Xvfb` (the
+display), a window manager (`fluxbox`), `x11vnc`, and `websockify`
+serving noVNC. Every command `computerd` runs gets `DISPLAY` set, so
+GUI programs started from `shell.exec` appear on that screen.
+
+| Variable                  | Default | Meaning                                                              |
+| ------------------------- | ------- | -------------------------------------------------------------------- |
+| `DESKTOP_ENABLED`         | off     | `1` starts the desktop at boot.                                      |
+| `DESKTOP_RESOLUTION`      | 1280x720x24 | `WIDTHxHEIGHT[xDEPTH]`.                                          |
+| `DESKTOP_DISPLAY`         | `:99`   | X display name.                                                      |
+| `DESKTOP_WM`              | fluxbox | Window manager binary.                                               |
+| `DESKTOP_EXTERNAL_SERVER` | off     | Use an X server that is already running instead of starting `Xvfb`.  |
+
+The automation calls live on `WorkspaceRPC.desktop` (see
+[`@cloudflare/computer-rpc`](../rpc/README.md)): `screenshot`, `click`
+and its variants, `move`, `drag`, `scroll`, `type`, `key`,
+`cursorPosition`, `screenSize`, `windows`, `focusWindow`,
+`clipboardRead`, `clipboardWrite`, and `wait`. They shell out to
+`xdotool`, `scrot` or ImageMagick `import`, `xclip`, and `wmctrl`. When
+the desktop is off, the calls reject with the wire error code
+`ENOSYS`.
+
+`GET /__computerd/info` includes a `desktop` status object, and
+`GET /desktop/screenshot` returns a PNG for a quick look from a browser
+or `curl`.
+
+### Desktop image
+
+[`Dockerfile.desktop`](Dockerfile.desktop) builds a Linux image with
+FUSE, the desktop stack above, and `computerd`. It exposes `8080`
+(`computerd`), `5900` (VNC), and `6080` (noVNC). Build it from the
+repository root:
+
+```sh
+docker build -f packages/computerd/Dockerfile.desktop -t computerd-desktop .
+```
+
+Then run it with the desktop enabled, publishing the noVNC port:
+
+```sh
+docker run --rm -p 8080:8080 -p 6080:6080 \
+  -e DESKTOP_ENABLED=1 -e RPC_CLIENT_SECRET=dev \
+  computerd-desktop
+```
+
+Browse to `http://localhost:6080/vnc.html` to watch it. From
+`@cloudflare/computer`, `DockerContainerBackend` starts this image for
+you; see [Running without Cloudflare](../computer/README.md#running-without-cloudflare).

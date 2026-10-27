@@ -158,6 +158,10 @@ try {
             { filter: /(^undici$|[/\\]chunks[/\\]undici-[^/\\]*\.js$)/ },
             () => ({ path: resolve(here, "undici-stub.mjs") }),
           );
+          pluginBuild.onResolve({ filter: /[/\\]cloudflare-workers\.js$/ }, () => ({
+            path: "cloudflare:workers",
+            external: true,
+          }));
         },
       },
     ],

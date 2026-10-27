@@ -5,12 +5,13 @@ import { mkdir } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
-import type { ExecEvent as RpcExecEvent } from "@cloudflare/computer-rpc";
+import type { DesktopStatus, ExecEvent as RpcExecEvent } from "@cloudflare/computer-rpc";
 import { isStubTrackingEnabled, stubSnapshot } from "@cloudflare/computer-rpc/debug";
 import type { RunnerLike } from "@cloudflare/computer-rpc/server";
 import { acceptWebSocketSession, createWorkspaceServer } from "@cloudflare/computer-rpc/server";
 import type { Database } from "@cloudflare/dofs";
 import { WebSocket, WebSocketServer } from "ws";
+import { DesktopController, parseDesktopEnv } from "../desktop/index.js";
 import { Runner } from "../exec/index.js";
 import type { ExecEvent as ComputerdExecEvent } from "../exec/types.js";
 import {
@@ -43,12 +44,6 @@ const DEFAULT_PORT = BUILD_DEFAULT_PORT ?? 45678;
 const DEFAULT_MOUNT_POINT = "/workspace";
 const HOST = "0.0.0.0";
 
-// The previous boot path used three separate env vars to pick a
-// FUSE backend (DISABLE_FUSE, FUSE_SHIM, WSD_FUSE_BACKEND). They
-// were collapsed into a single FUSE_MOUNT knob. We're pre-1.0 alpha
-// with no production consumers, so refuse to boot on the old vars
-// rather than silently translating — the operator should learn the
-// new name once.
 const LEGACY_FUSE_ENV_MIGRATION: Record<string, string> = {
   DISABLE_FUSE: "FUSE_MOUNT=none",
   FUSE_SHIM: "FUSE_MOUNT=shim",
@@ -106,37 +101,21 @@ function requestPath(request: IncomingMessage): string {
   return url.pathname;
 }
 
-// Routes reachable without the shared secret. Readiness has to stay
-// open: the host polls it before it holds any session, and a gated
-// probe turns a bad token into what looks like a container that never
-// started.
 const UNAUTHENTICATED_PATHS = new Set(["/health"]);
 
-// When RPC_CLIENT_SECRET is set, every other route requires it as a
-// bearer token. When it is unset there is nothing to check and the
-// surface is open, which is how the harnesses and local runs work.
 function isAuthorized(request: IncomingMessage, secret: string | undefined): boolean {
   if (secret === undefined) return true;
   const header = request.headers.authorization;
   if (typeof header !== "string") return false;
-  // The scheme token is case-insensitive and may be followed by more
-  // than one space, so "bearer <secret>" from a hand-written client is
-  // as valid as "Bearer <secret>". Only the credentials that follow are
-  // compared byte for byte.
   const separator = header.indexOf(" ");
   if (separator === -1) return false;
   if (header.slice(0, separator).toLowerCase() !== "bearer") return false;
   const presented = Buffer.from(header.slice(separator + 1).trim());
   const expected = Buffer.from(secret);
-  // timingSafeEqual throws on a length mismatch, and the length of the
-  // secret is not worth leaking through the comparison either.
   if (presented.length !== expected.length) return false;
   return timingSafeEqual(presented, expected);
 }
 
-// Strip heartbeat events from a Runner stream before it reaches the
-// RPC layer. Heartbeats are a local observability signal only; the
-// computer-rpc wire contract carries only stdout, stderr, and exit.
 function dropHeartbeats(stream: ReadableStream<ComputerdExecEvent>): ReadableStream<RpcExecEvent> {
   return stream.pipeThrough(
     new TransformStream<ComputerdExecEvent, RpcExecEvent>({
@@ -155,11 +134,9 @@ interface ComputerdInfo {
   port: number;
   store: ResolvedStore;
   ignore: MountIgnoreInfo;
+  desktop?: DesktopStatus;
 }
 
-// Snapshot DOFS table sizes and process memory so an external caller
-// can watch growth without attaching a debugger. Used by the
-// /__computerd/stats endpoint while diagnosing the npm install OOM.
 function collectDbStats(db: Database): Record<string, unknown> {
   // oxlint-disable-next-line typescript/no-explicit-any -- small ad-hoc shape
   const out: Record<string, any> = {};
@@ -192,7 +169,6 @@ function collectDbStats(db: Database): Record<string, unknown> {
 
 interface HTTPHandle {
   server: Server;
-  // Tear down the WebSocketServer alongside the HTTP server.
   close: () => Promise<void>;
 }
 
@@ -202,17 +178,12 @@ function createHTTPServer(
   secret: string | undefined,
   getStats?: () => Record<string, unknown>,
   checkpoint?: () => { walFrames: number; sizeBytes: number; durationMs: number },
+  desktop?: DesktopController,
 ): HTTPHandle {
-  // Holds the current outbound capnweb session opened via /connect.
-  // Re-POSTing /connect (e.g. after a DO hibernate + new incarnation)
-  // closes the previous socket so the old session doesn't leak for
-  // the life of the container.
   const upstreamSlot: { ws: WebSocket | undefined } = { ws: undefined };
   const server = createServer((request, response) => {
     const path = requestPath(request);
 
-    // Checked before routing so an unauthorized caller cannot learn
-    // which routes exist.
     if (!UNAUTHENTICATED_PATHS.has(path) && !isAuthorized(request, secret)) {
       send(response, 401, "unauthorized\n", {
         "www-authenticate": "Bearer",
@@ -221,11 +192,6 @@ function createHTTPServer(
       return;
     }
 
-    // /api — the capnweb endpoint. It carries one transport, a
-    // websocket, so a request that reaches the ordinary handler here
-    // has no Upgrade header and cannot be served. Say so plainly:
-    // the alternative is a caller that connects, makes one call that
-    // appears to work, and then fails on a stream.
     if (path === "/api") {
       send(response, 400, "/api requires a websocket upgrade\n", {
         "content-type": "text/plain; charset=utf-8",
@@ -233,11 +199,6 @@ function createHTTPServer(
       return;
     }
 
-    // /connect — POST { base, health, api } naming an endpoint the
-    // host wants us to dial back into. We poll `base + health` until
-    // it answers, then open a capnweb WebSocket session against
-    // `base + api` and serve our RPC over it: the same session as an
-    // inbound upgrade, with the carrier inverted because we dial out.
     if (path === "/connect") {
       if (request.method !== "POST") {
         send(response, 405, "method not allowed\n", {
@@ -250,10 +211,6 @@ function createHTTPServer(
       return;
     }
 
-    // /__computerd/checkpoint — fold the write-ahead log back into
-    // the main database file. A host about to ask the platform for a
-    // disk snapshot calls this first so the snapshot captures one
-    // file rather than a file plus a log segment.
     if (path === "/__computerd/checkpoint") {
       if (request.method !== "POST") {
         send(response, 405, "method not allowed\n", {
@@ -289,16 +246,6 @@ function createHTTPServer(
       return;
     }
 
-    // /api/watermarks — the same sync revisions the session serves,
-    // over plain HTTP, for samplers that want a few numbers on an
-    // interval rather than a session of their own. It reads through
-    // rpc.sync.watermarks(), so the two cannot drift. Part of the
-    // workspace API rather than daemon introspection, hence /api
-    // rather than /__computerd.
-    //
-    // It has to sit below the method guard above: reads only, and the
-    // guard is what enforces that for every read route. Above it, this
-    // answered a POST or a DELETE with the numbers.
     if (path === "/api/watermarks") {
       if (request.method === "HEAD") {
         send(response, 200, "", { "content-type": "application/json; charset=utf-8" });
@@ -315,6 +262,42 @@ function createHTTPServer(
           console.error("/api/watermarks failed:", error);
           if (!response.headersSent) {
             send(response, 500, "internal error\n", {
+              "content-type": "text/plain; charset=utf-8",
+            });
+          }
+        });
+      return;
+    }
+
+    if (path === "/desktop/screenshot") {
+      if (desktop === undefined) {
+        send(response, 404, "desktop unavailable\n", {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        return;
+      }
+      const reqUrl = new URL(request.url ?? "/", "http://localhost");
+      const format = reqUrl.searchParams.get("format") === "jpeg" ? "jpeg" : "png";
+      void desktop
+        .screenshot({ format })
+        .then((shot) => {
+          const buf = Buffer.from(shot.data);
+          response.writeHead(200, {
+            "content-type": shot.mimeType,
+            "content-length": buf.byteLength.toString(),
+            "x-desktop-width": String(shot.width),
+            "x-desktop-height": String(shot.height),
+          });
+          if (request.method === "HEAD") {
+            response.end();
+          } else {
+            response.end(buf);
+          }
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!response.headersSent) {
+            send(response, 500, `${message}\n`, {
               "content-type": "text/plain; charset=utf-8",
             });
           }
@@ -354,7 +337,11 @@ function createHTTPServer(
     }
 
     if (path === "/__computerd/info") {
-      const body = request.method === "HEAD" ? "" : JSON.stringify(info);
+      const snapshot: ComputerdInfo = {
+        ...info,
+        ...(desktop !== undefined ? { desktop: desktop.getStatusSync() } : {}),
+      };
+      const body = request.method === "HEAD" ? "" : JSON.stringify(snapshot);
       send(response, 200, body, {
         "content-type": "application/json; charset=utf-8",
       });
@@ -374,14 +361,6 @@ function createHTTPServer(
     });
   });
 
-  // /api — the capnweb endpoint. Long-lived, bidirectional, and
-  // streaming-friendly, which is what the wire contract needs: every
-  // call that reads data back returns a ReadableStream.
-  // perMessageDeflate compresses each frame with zlib. Defaults off
-  // in the `ws` package; we turn it on so any Node-side client that
-  // negotiates the extension saves bytes on the wire. Clients that
-  // don't advertise it negotiate down to plain frames, so no flag day
-  // for workerd or browser callers.
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: true });
   wss.on("connection", (ws) => {
     acceptWebSocketSession(ws, rpc);
@@ -399,18 +378,6 @@ function createHTTPServer(
       socket.destroy();
       return;
     }
-    // `ws` answers a malformed handshake for us: 405 for a method
-    // other than GET, 400 for a bad Upgrade header or a missing key.
-    // It answers 400 for an unsupported version too, where the
-    // websocket specification calls for 426, so that one case is
-    // handled here before handing over.
-    //
-    // Only a header naming a single version we do not speak earns 426.
-    // Absent, repeated (node joins the values into "13, 13"), or not a
-    // whole number are all malformed handshakes rather than version
-    // mismatches, and answering those with 426 points the caller at
-    // something that was never the problem. They fall through to `ws`,
-    // which answers 400 and still reports the versions we do speak.
     const versionHeader = request.headers["sec-websocket-version"];
     const version = typeof versionHeader === "string" ? Number(versionHeader.trim()) : Number.NaN;
     if (Number.isInteger(version) && version !== 13 && version !== 8) {
@@ -449,30 +416,13 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-// The caller names every part of the endpoint it wants us to reach.
-// We assemble `base + health` and `base + api` and hold no opinion
-// about either path, so the host is free to rename its own routes
-// without a matching release of this binary.
 interface ConnectBody {
-  // http:// or https:// origin of the endpoint, optionally with a
-  // path prefix. Trailing slashes are trimmed.
   base?: unknown;
-  // Absolute path of the readiness probe, e.g. "/health".
   health?: unknown;
-  // Absolute path of the capnweb endpoint, e.g. "/api". Dialed as
-  // ws:// or wss:// according to the scheme on `base`.
   api?: unknown;
-  // How long to poll the readiness probe before giving up. Defaults
-  // to 30s; the egress proxy is up at boot but the worker that hosts
-  // it may take a tick.
   healthTimeoutMs?: unknown;
 }
 
-// A path we're willing to append to `base`. Rejecting anything that
-// parses as an address of its own keeps a caller from redirecting the
-// dial somewhere the base never pointed. "//host/path" is
-// protocol-relative, which resolves against the base's scheme rather
-// than staying under the base, so it goes too.
 function isEndpointPath(value: unknown): value is string {
   if (typeof value !== "string") return false;
   if (!value.startsWith("/")) return false;
@@ -534,10 +484,6 @@ async function handleConnect(
     return;
   }
 
-  // Close any prior outbound session before opening a new one. A DO
-  // restart / hibernate hands the new incarnation a fresh /connect;
-  // without this, the previous WebSocket leaks for the life of the
-  // container.
   const previous = upstreamSlot.ws;
   if (previous !== undefined) {
     upstreamSlot.ws = undefined;
@@ -549,11 +495,6 @@ async function handleConnect(
   }
 
   const wsUrl = `${toWebSocketUrl(baseUrl)}${body.api}`;
-  // Present the shared secret on the way out as well. The host arms a
-  // slot for this upgrade and hands the first arrival its session, so
-  // without a token anything that can reach the host's endpoint — which
-  // includes every command this daemon runs — could take the workspace's
-  // place. The host holds the same secret, having set it at launch.
   const ws = new WebSocket(wsUrl, {
     ...(secret !== undefined ? { headers: { authorization: `Bearer ${secret}` } } : {}),
   });
@@ -563,8 +504,6 @@ async function handleConnect(
     acceptWebSocketSession(ws, rpc);
   });
   ws.once("close", () => {
-    // Drop the slot only if we're still the current ws — a
-    // subsequent /connect may have already installed a new one.
     if (upstreamSlot.ws === ws) upstreamSlot.ws = undefined;
   });
   ws.once("error", (err) => {
@@ -610,42 +549,20 @@ async function waitForHealth(healthUrl: string, timeoutMs: number): Promise<void
 }
 
 async function main(): Promise<void> {
-  // Install logging + crash handlers first thing so any early throws
-  // (parsePort, parseMountPoint, resolveFuseBackend) still land in
-  // LOG_FILE when set.
   const teardownLogging = installLogging(process.env.LOG_FILE);
 
   rejectLegacyFuseEnv(process.env);
 
-  // Read the shared secret once and drop it from the environment. The
-  // exec allowlist already keeps it out of spawned commands; removing
-  // it here means a future code path that spreads process.env cannot
-  // reintroduce the leak.
   const clientSecret = process.env.RPC_CLIENT_SECRET?.trim() || undefined;
   delete process.env.RPC_CLIENT_SECRET;
 
   const port = parsePort(process.env.PORT);
   const mountPoint = parseMountPoint(process.env.MOUNT_POINT);
-  // FUSE_MOUNT picks the backend. auto (default) probes /dev/fuse
-  // or macFUSE and falls back to the userspace shim. fuse / macfuse
-  // require their respective real backend. shim forces the userspace
-  // polling shim. none skips the mount entirely; HTTP and /api
-  // still come up so tests and tooling can talk to computerd's RPC surface.
   const fuseMountMode = parseFuseMountMode(process.env.FUSE_MOUNT);
   const backend: FUSEBackend = await resolveFuseBackend(fuseMountMode);
   console.log(`[info] FUSE_MOUNT=${fuseMountMode} resolved to backend=${backend.kind}`);
 
-  // Local-only paths (#179). Resolved before the store so a
-  // misconfiguration fails the daemon at startup rather than after the
-  // mount is live: a silently dropped entry would send a full
-  // node_modules into the Durable Object, which is the failure this
-  // feature exists to prevent.
   const ignoreConfig = resolveMountIgnoreConfig(process.env, mountPoint);
-  // The shim copies everything under the mount into the VFS, so it has
-  // no way to keep a path local. Starting anyway would report the paths
-  // as local-only on /__computerd/info while syncing them, and the
-  // host's check would pass. FUSE_MOUNT=auto lands here too when
-  // /dev/fuse is missing, which is exactly when this needs to be loud.
   if (ignoreConfig.enabled && backend.kind === "shim") {
     throw new Error(
       `MOUNT_IGNORE is not supported on the userspace shim (FUSE_MOUNT=${fuseMountMode} ` +
@@ -658,9 +575,6 @@ async function main(): Promise<void> {
         `(${ignoreConfig.ignore.patterns.join(", ")})`,
     );
     for (const exclusion of ignoreConfig.ignore.ineffectiveExclusions) {
-      // Same rule as git: a path can't be put back in sync once a
-      // directory above it is local-only, because the synced side has no
-      // directory for it to live in.
       console.log(
         `[warn] MOUNT_IGNORE exclusion ${exclusion} has no effect: a directory ` +
           `above it is already local-only.`,
@@ -675,6 +589,15 @@ async function main(): Promise<void> {
     }`,
   );
 
+  const desktop = new DesktopController(parseDesktopEnv(process.env));
+  if (desktop.enabled) {
+    await desktop.start();
+    const st = desktop.getStatusSync();
+    console.log(
+      `[info] desktop active: display=${st.display} resolution=${st.width}x${st.height}x${st.depth} vnc=${st.vncPort ?? "off"} novnc=${st.noVncPort ?? "off"}`,
+    );
+  }
+
   const {
     vfs,
     db,
@@ -688,19 +611,12 @@ async function main(): Promise<void> {
     port,
     store,
     ignore: describeMountIgnore(ignoreConfig),
+    desktop: desktop.getStatusSync(),
   };
 
   let fuse: FuseMount | undefined;
-  // When running on the userspace shim, capture the typed handle
-  // so we can wire `flush()` and `reconcileNow()` into the SyncRPC
-  // afterApply / beforeFetch hooks below. A real FUSE mount serves
-  // reads straight from the VFS, so it doesn't need either settle.
   let shim: ShimMount | undefined;
   if (backend.kind !== "none") {
-    // The VFS stores everything under `mountPoint` so capnweb pulls,
-    // shim materialisation, and shell `exec` agree on absolute
-    // paths. Pre-create the mount directory in the VFS so FUSE's
-    // first getattr on "/" can stat the mount root.
     vfs.mkdirSync(mountPoint, { recursive: true });
     await mkdir(mountPoint, { recursive: true });
 
@@ -708,10 +624,6 @@ async function main(): Promise<void> {
       shim = await mountShim({ vfs, mountPoint });
       fuse = shim;
     } else {
-      // The local-only store is created eagerly so a permission or
-      // read-only-filesystem problem surfaces at mount time, next to
-      // the configuration that caused it, rather than on the first
-      // write into an ignored path mid-command.
       if (ignoreConfig.enabled) {
         await mkdir(ignoreConfig.root, { recursive: true });
       }
@@ -731,8 +643,7 @@ async function main(): Promise<void> {
       });
     }
   }
-  // EXEC_LOG_MAX_BYTES lets the harness force size-cap eviction
-  // without rebuilding the binary. Default lives in the Runner.
+
   const logMaxBytesEnv = process.env.EXEC_LOG_MAX_BYTES;
   let logMaxBytesOverride: number | undefined;
   if (logMaxBytesEnv !== undefined && logMaxBytesEnv !== "") {
@@ -744,8 +655,6 @@ async function main(): Promise<void> {
     }
     logMaxBytesOverride = parsed;
   }
-  // EXEC_SHELL picks the interpreter exec runs commands under, for images
-  // whose /bin/sh cannot be repointed. Default lives in the Runner.
   const shellEnv = process.env.EXEC_SHELL;
   let shellOverride: string | undefined;
   if (shellEnv !== undefined && shellEnv !== "") {
@@ -756,15 +665,11 @@ async function main(): Promise<void> {
   }
   const runner = new Runner({
     db,
-    // When we have a mount (real FUSE or the shim) point spawned
-    // children at it so writes from exec flow through the VFS.
     ...(fuse !== undefined ? { cwd: mountPoint } : {}),
+    ...(desktop.enabled ? { env: { DISPLAY: desktop.display } } : {}),
     ...(logMaxBytesOverride !== undefined ? { logMaxBytes: logMaxBytesOverride } : {}),
     ...(shellOverride !== undefined ? { shell: shellOverride } : {}),
   });
-  // Heartbeat events are computerd-local and must not cross the RPC boundary.
-  // Wrap the runner so every exec/get stream drops heartbeat events before
-  // they reach the wire. RunnerLike expects only stdout, stderr, and exit.
   const rpcRunner: RunnerLike = {
     exec(command, options) {
       const handle = runner.exec(command, options);
@@ -778,17 +683,7 @@ async function main(): Promise<void> {
     dispose: runner.dispose.bind(runner),
   };
   const rpc = createWorkspaceServer(db, rpcRunner, {
-    // Push handler awaits the shim flush before returning, so any
-    // exec()/read against the host fs after a push sees the new
-    // files. Real FUSE doesn't need this — the kernel-FUSE driver
-    // serves reads from the VFS directly.
-    // Symmetric shim settles:
-    //   - afterApply (push side): wait for the VFS→disk flush so
-    //     a subsequent `shell.exec` sees the just-pushed files.
-    //   - beforeFetch (pull side): wait for the disk→VFS reconcile
-    //     so a `Workspace.pull()` issued right after `shell.exec`
-    //     observes files the exec'd process just wrote, without
-    //     waiting on the next periodic poll tick.
+    desktop,
     ...(shim
       ? {
           afterApply: () => shim.flush(),
@@ -811,6 +706,7 @@ async function main(): Promise<void> {
       };
     },
     checkpointStore,
+    desktop,
   );
 
   let shuttingDown = false;
@@ -828,13 +724,15 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error(error);
     }
+    try {
+      await desktop.stop();
+    } catch (error) {
+      console.error(error);
+    }
 
     if (fuse !== undefined) {
       await unmount(fuse);
     }
-    // Unmount first. The FUSE driver writes any buffered bytes to the
-    // database when it releases a file, and those writes need to land
-    // before the store closes.
     try {
       closeStore();
     } catch (error) {

@@ -1,3 +1,15 @@
+export {
+  type CommandResult,
+  type DesktopCommandRunner,
+  DesktopController,
+  type DesktopControllerOptions,
+  type DesktopProcessSpawner,
+  type ManagedProcess,
+  normalizeKeySpec,
+  parseDesktopEnv,
+  parseImageDimensions,
+  parseResolution,
+} from "../desktop/index.js";
 export { createLog, EventLog, openLog } from "./log.js";
 export { type ExecHandle, Runner, type RunnerInit } from "./runner.js";
 export { clearExecState, initializeExecSchema } from "./schema.js";

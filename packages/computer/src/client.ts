@@ -344,6 +344,8 @@ export interface WorkspaceClient {
   readonly assets: any;
   // oxlint-disable-next-line typescript/no-explicit-any -- artifacts type differs local vs remote
   readonly artifacts: any;
+  // oxlint-disable-next-line typescript/no-explicit-any -- desktop type differs local vs remote
+  readonly desktop: any;
   [Symbol.dispose](): void;
 }
 
@@ -376,6 +378,9 @@ function makeClient(
     get artifacts() {
       return surface.artifacts;
     },
+    get desktop() {
+      return surface.desktop;
+    },
     [Symbol.dispose]: dispose,
   };
 }
@@ -386,6 +391,7 @@ function makeClient(
 // RPC stub of `WorkspaceStub`, not `WorkspaceStub` itself, so the result
 // is not checked here.
 export type WorkspaceHandle =
+  | Workspace
   | { [WORKSPACE]?: unknown }
   | { __getWorkspaceStub(): PromiseLike<unknown> };
 
@@ -476,7 +482,9 @@ export function getWorkspace(source: WorkspaceSource): LazyWorkspaceClient {
 }
 
 async function loadWorkspace(handle: WorkspaceHandle): Promise<WorkspaceClient> {
-  const local = (handle as { [WORKSPACE]?: unknown })[WORKSPACE];
+  // A bare Workspace (standalone use outside a Durable Object) is its own host.
+  const local =
+    handle instanceof Workspace ? handle : (handle as { [WORKSPACE]?: unknown })[WORKSPACE];
   if (local instanceof Workspace) {
     // Local path: delegate straight to the in-isolate Workspace.
     // Nothing to dispose — the durable object owns the Workspace
@@ -490,6 +498,7 @@ async function loadWorkspace(handle: WorkspaceHandle): Promise<WorkspaceClient> 
           return local.git;
         },
         artifacts: local.artifacts,
+        desktop: local.desktop,
         assets: local.assets,
       },
       // Local handle is already a host ExecHandle — pass it through.

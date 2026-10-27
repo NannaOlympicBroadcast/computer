@@ -66,6 +66,7 @@ import type {
   ArtifactsCLIResult,
 } from "./artifacts/index.js";
 import type { ShareOptions } from "./assets/index.js";
+import type { WorkspaceDesktop } from "./desktop/index.js";
 import type { GitCliInput, GitCliResult } from "./git/index.js";
 import { withSpan } from "./observe.js";
 import type { WorkspaceBackendInfo } from "./runtime/runtime.js";
@@ -636,6 +637,7 @@ export class WorkspaceStub extends RpcTarget {
   readonly #git: WorkspaceGitStub;
   readonly #assets: WorkspaceAssetsStub | undefined;
   readonly #artifacts: WorkspaceArtifactsStub;
+  readonly #desktop: WorkspaceDesktopStub;
 
   constructor(ws: Workspace) {
     super();
@@ -644,6 +646,7 @@ export class WorkspaceStub extends RpcTarget {
     this.#git = new WorkspaceGitStub(ws);
     this.#assets = ws.assets === undefined ? undefined : new WorkspaceAssetsStub(ws);
     this.#artifacts = new WorkspaceArtifactsStub(ws.artifacts);
+    this.#desktop = new WorkspaceDesktopStub(ws.desktop);
     trackStub(this);
   }
 
@@ -659,6 +662,7 @@ export class WorkspaceStub extends RpcTarget {
     this.#git[Symbol.dispose]();
     this.#assets?.[Symbol.dispose]();
     this.#artifacts[Symbol.dispose]();
+    this.#desktop[Symbol.dispose]();
     untrackStub(this);
   }
 
@@ -687,5 +691,146 @@ export class WorkspaceStub extends RpcTarget {
 
   get artifacts(): WorkspaceArtifactsStub {
     return this.#artifacts;
+  }
+
+  // Desktop GUI automation. Every call fails with ENOSYS when the
+  // backend's computerd runs without a desktop.
+  get desktop(): WorkspaceDesktopStub {
+    return this.#desktop;
+  }
+}
+
+// Desktop half. Forwards every WorkspaceDesktop method verbatim; all
+// arguments and results are plain objects or Uint8Array, so they cross
+// Workers RPC unchanged.
+export class WorkspaceDesktopStub extends RpcTarget {
+  readonly #desktop: WorkspaceDesktop;
+
+  constructor(desktop: WorkspaceDesktop) {
+    super();
+    this.#desktop = desktop;
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
+  }
+
+  status(...args: Parameters<WorkspaceDesktop["status"]>): ReturnType<WorkspaceDesktop["status"]> {
+    return this.#desktop.status(...args);
+  }
+
+  start(...args: Parameters<WorkspaceDesktop["start"]>): ReturnType<WorkspaceDesktop["start"]> {
+    return this.#desktop.start(...args);
+  }
+
+  stop(...args: Parameters<WorkspaceDesktop["stop"]>): ReturnType<WorkspaceDesktop["stop"]> {
+    return this.#desktop.stop(...args);
+  }
+
+  screenshot(
+    ...args: Parameters<WorkspaceDesktop["screenshot"]>
+  ): ReturnType<WorkspaceDesktop["screenshot"]> {
+    return this.#desktop.screenshot(...args);
+  }
+
+  click(...args: Parameters<WorkspaceDesktop["click"]>): ReturnType<WorkspaceDesktop["click"]> {
+    return this.#desktop.click(...args);
+  }
+
+  doubleClick(
+    ...args: Parameters<WorkspaceDesktop["doubleClick"]>
+  ): ReturnType<WorkspaceDesktop["doubleClick"]> {
+    return this.#desktop.doubleClick(...args);
+  }
+
+  tripleClick(
+    ...args: Parameters<WorkspaceDesktop["tripleClick"]>
+  ): ReturnType<WorkspaceDesktop["tripleClick"]> {
+    return this.#desktop.tripleClick(...args);
+  }
+
+  rightClick(
+    ...args: Parameters<WorkspaceDesktop["rightClick"]>
+  ): ReturnType<WorkspaceDesktop["rightClick"]> {
+    return this.#desktop.rightClick(...args);
+  }
+
+  middleClick(
+    ...args: Parameters<WorkspaceDesktop["middleClick"]>
+  ): ReturnType<WorkspaceDesktop["middleClick"]> {
+    return this.#desktop.middleClick(...args);
+  }
+
+  mouseDown(
+    ...args: Parameters<WorkspaceDesktop["mouseDown"]>
+  ): ReturnType<WorkspaceDesktop["mouseDown"]> {
+    return this.#desktop.mouseDown(...args);
+  }
+
+  mouseUp(
+    ...args: Parameters<WorkspaceDesktop["mouseUp"]>
+  ): ReturnType<WorkspaceDesktop["mouseUp"]> {
+    return this.#desktop.mouseUp(...args);
+  }
+
+  move(...args: Parameters<WorkspaceDesktop["move"]>): ReturnType<WorkspaceDesktop["move"]> {
+    return this.#desktop.move(...args);
+  }
+
+  drag(...args: Parameters<WorkspaceDesktop["drag"]>): ReturnType<WorkspaceDesktop["drag"]> {
+    return this.#desktop.drag(...args);
+  }
+
+  scroll(...args: Parameters<WorkspaceDesktop["scroll"]>): ReturnType<WorkspaceDesktop["scroll"]> {
+    return this.#desktop.scroll(...args);
+  }
+
+  type(...args: Parameters<WorkspaceDesktop["type"]>): ReturnType<WorkspaceDesktop["type"]> {
+    return this.#desktop.type(...args);
+  }
+
+  key(...args: Parameters<WorkspaceDesktop["key"]>): ReturnType<WorkspaceDesktop["key"]> {
+    return this.#desktop.key(...args);
+  }
+
+  cursorPosition(
+    ...args: Parameters<WorkspaceDesktop["cursorPosition"]>
+  ): ReturnType<WorkspaceDesktop["cursorPosition"]> {
+    return this.#desktop.cursorPosition(...args);
+  }
+
+  screenSize(
+    ...args: Parameters<WorkspaceDesktop["screenSize"]>
+  ): ReturnType<WorkspaceDesktop["screenSize"]> {
+    return this.#desktop.screenSize(...args);
+  }
+
+  windows(
+    ...args: Parameters<WorkspaceDesktop["windows"]>
+  ): ReturnType<WorkspaceDesktop["windows"]> {
+    return this.#desktop.windows(...args);
+  }
+
+  focusWindow(
+    ...args: Parameters<WorkspaceDesktop["focusWindow"]>
+  ): ReturnType<WorkspaceDesktop["focusWindow"]> {
+    return this.#desktop.focusWindow(...args);
+  }
+
+  clipboardRead(
+    ...args: Parameters<WorkspaceDesktop["clipboardRead"]>
+  ): ReturnType<WorkspaceDesktop["clipboardRead"]> {
+    return this.#desktop.clipboardRead(...args);
+  }
+
+  clipboardWrite(
+    ...args: Parameters<WorkspaceDesktop["clipboardWrite"]>
+  ): ReturnType<WorkspaceDesktop["clipboardWrite"]> {
+    return this.#desktop.clipboardWrite(...args);
+  }
+
+  wait(...args: Parameters<WorkspaceDesktop["wait"]>): ReturnType<WorkspaceDesktop["wait"]> {
+    return this.#desktop.wait(...args);
   }
 }

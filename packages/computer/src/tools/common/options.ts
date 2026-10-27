@@ -1,3 +1,4 @@
+import type { DesktopWorkspaceLike } from "./desktop.js";
 import type { ExecBackends, ExecToolOptions, ExecWorkspaceLike } from "./exec.js";
 import { confineWorkspace } from "./fs/confine.js";
 import type { EditToolOptions } from "./fs/edit.js";
@@ -8,7 +9,12 @@ import type { PublishWorkspaceLike } from "./publish.js";
 
 /** Options every tool set takes: `createAITools`, `createPiTools`, and `createTanStackTools`. */
 export interface CreateToolsOptions {
-  workspace: FileWorkspaceLike & Partial<ExecWorkspaceLike> & Partial<PublishWorkspaceLike>;
+  workspace: FileWorkspaceLike &
+    Partial<ExecWorkspaceLike> &
+    Partial<PublishWorkspaceLike> &
+    DesktopWorkspaceLike;
+  /** Add the `desktop` tool. Needs `workspace.desktop`; off by default. */
+  desktop?: boolean;
   /** Omit `write`, `edit`, `delete`, `exec`, and `publish`. */
   readonly?: boolean;
   root?: string;
@@ -45,6 +51,7 @@ export interface ResolvedToolOptions {
   /** Absent when the set is read-only, the Workspace has no runtime, or no backend is selected. */
   exec?: ExecToolOptions;
   publish: boolean;
+  desktop: boolean;
   readonly: boolean;
   workspace: CreateToolsOptions["workspace"];
 }
@@ -64,6 +71,7 @@ export function resolveToolOptions(options: CreateToolsOptions): ResolvedToolOpt
     delete: { store },
     exec: readonly ? undefined : execOptions(options),
     publish: !readonly && options.assets !== false && workspace.assets !== undefined,
+    desktop: !readonly && options.desktop === true && workspace.desktop !== undefined,
     readonly,
     workspace,
   };

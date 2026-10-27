@@ -63,3 +63,26 @@ console.log(stubSnapshot());
 
 The counter is opt-in and has no cost when disabled. `computerd`
 exposes the snapshot at `GET /__computerd/stubs` when tracking is on.
+
+## Desktop
+
+`WorkspaceRPC` has an optional `desktop?: DesktopRPC` half for GUI
+automation against a desktop-enabled `computerd`: `status`, `start`,
+`stop`, `screenshot`, the click family, `mouseDown`/`mouseUp`, `move`,
+`drag`, `scroll`, `type`, `key`, `cursorPosition`, `screenSize`,
+`windows`, `focusWindow`, `clipboardRead`, `clipboardWrite`, and
+`wait`. The input and result types (`DesktopClickInput`,
+`DesktopScreenshotResult`, `DesktopStatus`, ...) are exported from the
+package root. Screenshot bytes travel as a `Uint8Array`.
+
+`createWorkspaceServer(db, { desktop })` serves it, where `desktop` is
+any object with the `DesktopLike` shape. Without one, every call
+rejects with the new wire error code `ENOSYS`. The server builds the
+`desktop` stub lazily, so a session that never reads `.desktop`
+allocates nothing, and disposes it with the workspace stub.
+
+## Client options
+
+`createSyncClient` and `createWorkspaceClient` accept `secret` (sent as
+`Authorization: Bearer <secret>`) and `headers`, and return a
+`closed` promise that settles when the WebSocket closes or errors.
