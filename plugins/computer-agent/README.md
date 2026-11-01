@@ -13,6 +13,7 @@ Unified plugin, MCP server, and standalone CLI for driving `@cloudflare/computer
 
 ## Quick Install
 
+### 1. Install Agent Plugins & CLI Shims
 From the repository root (after `npm run build`):
 
 ```bash
@@ -20,6 +21,18 @@ node plugins/computer-agent/scripts/install.mjs
 ```
 
 This installs the plugin into Antigravity, Claude Code, and OpenAI Codex CLI simultaneously, writes `repo-root.json` so all installed copies resolve `@cloudflare/computer` directly, and creates the `computer-cli` wrapper in `~/.local/bin`.
+
+### 2. Deploy Cloud Desktop Server (One-Click)
+Prebuilt Docker desktop images (`computerd-desktop-linux-amd64.tar.gz`) are automatically published to GitHub Releases on push.
+
+On any Linux server with Docker:
+```bash
+# Automated install (auto-downloads image from GitHub Releases)
+curl -fsSL https://raw.githubusercontent.com/NannaOlympicBroadcast/computer/feat/standalone-and-desktop/install.sh | bash
+
+# Custom ports and secret
+bash install.sh --port 18080 --novnc-port 6080 --secret "local-dev-secret"
+```
 
 ---
 

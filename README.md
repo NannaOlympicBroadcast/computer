@@ -52,6 +52,27 @@ To contribute feedback, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 Approved collaborators should follow [`COLLABORATORS.md`](COLLABORATORS.md)
 for setup, build, and test instructions.
 
+### One-click cloud desktop deployment
+
+Prebuilt Docker desktop images (`computerd-desktop-linux-amd64.tar.gz`) are
+automatically built on every push and published under GitHub Releases.
+
+To install and launch the cloud desktop container on any Linux host with Docker:
+
+```bash
+# One-click install (auto-downloads image from GitHub Releases if missing)
+curl -fsSL https://raw.githubusercontent.com/NannaOlympicBroadcast/computer/feat/standalone-and-desktop/install.sh | bash
+
+# Or run with custom ports and token
+bash install.sh --port 18080 --novnc-port 6080 --secret "my-secret-token"
+
+# Or load directly from a downloaded release tarball
+bash install.sh --tar ./computerd-desktop-linux-amd64.tar.gz
+```
+
+The script automatically detects port conflicts (falling back if port 8080 is
+occupied), verifies health, and outputs the live noVNC desktop viewer URL.
+
 ## Examples
 
 The [`examples/`](examples) directory holds runnable consumers of the
